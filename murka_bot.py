@@ -12,7 +12,7 @@ The Storm / SSK Zvezda
 """
 
 from __future__ import annotations
-import asyncio, base64, io, logging, os, re, sqlite3, sys, zipfile
+import asyncio, base64, io, logging, re, sqlite3, sys, zipfile
 from pathlib import Path
 
 import aiohttp
@@ -29,15 +29,18 @@ from aiogram.enums import ParseMode
 # ══════════════════════════════════════════════════════════════════════════════
 class Secrets:
     # ── Telegram ──────────────────────────────────────────────────────────────
-    TG_BOT_TOKEN: str   = os.environ.get("TG_BOT_TOKEN", "")
+    TG_BOT_TOKEN: str = "8719798241:AAEO-Bg_n5gaKq1Oa1Bi87Wo3Y--ltRuH7E"
 
-    # ── OpenRouter ────────────────────────────────────────────────────────────
-    OPENROUTER_KEY: str = os.environ.get("OPENROUTER_KEY", "")
+    # ── OpenRouter (единственный шлюз, без VPN) ───────────────────────────────
+    OPENROUTER_KEY: str = "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"
     OPENROUTER_URL: str = "https://openrouter.ai/api/v1/chat/completions"
 
-    # ── Пул Gemini-ключей: GEMINI_1 ... GEMINI_15 из env ─────────────────────
+    # ── Пул Gemini-ключей: 15 штук, ротация при 429/403 ──────────────────────
     GEMINI_POOL: list[str] = [
-        k for k in [os.environ.get(f"GEMINI_{i}", "") for i in range(1, 16)] if k
+        "AIzaSyAKK1Zg6hshkVbHaOtzskVdtgiuYdSzRYw", "AIzaSyCoBfs8NbScT0JLSri4sWPZp4RT2DLcXOs",
+        "AIzaSyC74Y2JRouW_oqqUYiRKX9zrq0d9_tXCX8", "AIzaSyDy7S4A_yNnzKzaxXABWz5P96tmbiB_H5U", "AIzaSyDQKRdXYDDarLwBY1xyVQ2qVBsdBtsvc-w",
+        "AIzaSyDlPgpR6o1bN4YDYcopfAR0CdGA1gfBldY", "AIzaSyA00CFtlh57oUsYR8Nr-1RsTLO-pCkjQGs", "AIzaSyAYw69kC3Dt8Elye6othyHfwqQWN7YQX1I",
+        "AIzaSyCjabnkr1GJfbSYo7CkwIL-AEd8MavvtBs", "AIzaSyC9ZmsDVx1qkA52og7THRjgWxpiDJKKGCw",
     ]
 
     # ── Pollinations.ai (рисование, без ключа) ────────────────────────────────
@@ -47,10 +50,10 @@ class Secrets:
     )
 
     # ── Модели ────────────────────────────────────────────────────────────────
-    MODEL_CHAT:    str = "google/gemini-2.0-flash-001"
-    MODEL_VISION:  str = "google/gemini-2.0-flash-001"
+    MODEL_CHAT:    str = "gemini-2.5-flash-lite"
+    MODEL_VISION:  str = "gemini-2.5-flash-lite"
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
-    MODEL_LLAMA:   str = "meta-llama/llama-4-scout:free"   # для извлечения фактов
+    MODEL_LLAMA:   str = "meta-llama/llama-4-scout:free"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -196,65 +199,114 @@ def _build_system(uid: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# OPENROUTER ENGINE — async
+# ENGINE — Gemini напрямую, OpenRouter для Llama/Whisper
 # ══════════════════════════════════════════════════════════════════════════════
-TIMEOUT = aiohttp.ClientTimeout(total=60)
+TIMEOUT_GEMINI = aiohttp.ClientTimeout(total=60)
+TIMEOUT_OR     = aiohttp.ClientTimeout(total=60)
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
-async def _or_post(session: aiohttp.ClientSession, payload: dict,
-                   use_pool: bool = True) -> str:
-    """
-    POST к OpenRouter. Если модель Gemini и есть пул — при 429/403 ротирует ключи.
-    """
-    headers = {
-        "Content-Type":  "application/json",
-        "Authorization": f"Bearer {Secrets.OPENROUTER_KEY}",
-        "HTTP-Referer":  "https://ssk-zvezda.local",
-        "X-Title":       "The Storm — Murka Bot",
-    }
 
-    is_gemini = "gemini" in payload.get("model", "").lower()
-    attempts  = len(_keys) if (use_pool and is_gemini and len(_keys) > 0) else 1
+def _messages_to_gemini(messages: list) -> tuple:
+    system_text = ""
+    gem_msgs = []
+    for m in messages:
+        if m["role"] == "system":
+            system_text = m["content"]
+            continue
+        role = "user" if m["role"] == "user" else "model"
+        content = m["content"]
+        if isinstance(content, list):
+            parts = []
+            for c in content:
+                if c["type"] == "text":
+                    parts.append({"text": c["text"]})
+                elif c["type"] == "image_url":
+                    url = c["image_url"]["url"]
+                    if url.startswith("data:"):
+                        mt, b64 = url.split(",", 1)
+                        mt = mt.replace("data:", "").replace(";base64", "")
+                        parts.append({"inline_data": {"mime_type": mt, "data": b64}})
+            gem_msgs.append({"role": role, "parts": parts})
+        else:
+            gem_msgs.append({"role": role, "parts": [{"text": content}]})
+    return gem_msgs, system_text
 
-    for attempt in range(max(attempts, 1)):
-        # Внедряем Gemini-ключ через провайдер-оверрайд OpenRouter
-        send_payload = dict(payload)
-        if use_pool and is_gemini and len(_keys) > 0:
-            key = _keys.current() if attempt == 0 else _keys.rotate()
-            if key and len(key) > 20:
-                send_payload["provider"] = {"api_key": key}
 
+async def _gemini_post(session: aiohttp.ClientSession, messages: list, model: str) -> str:
+    gem_msgs, system_text = _messages_to_gemini(messages)
+    model_name = model.split("/")[-1]
+    url = GEMINI_API_URL.format(model=model_name)
+    body = {"contents": gem_msgs, "generationConfig": {"maxOutputTokens": 1500}}
+    if system_text:
+        body["system_instruction"] = {"parts": [{"text": system_text}]}
+
+    attempts = max(len(_keys), 1)
+    for attempt in range(attempts):
+        key = _keys.current() if attempt == 0 else _keys.rotate()
+        if not key:
+            return "GEMINI_POOL пуст."
         try:
             async with session.post(
-                Secrets.OPENROUTER_URL,
-                headers=headers,
-                json=send_payload,
-                timeout=TIMEOUT,
+                url,
+                headers={"Content-Type": "application/json", "x-goog-api-key": key},
+                json=body,
+                timeout=TIMEOUT_GEMINI,
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    return data["choices"][0]["message"]["content"]
-                elif resp.status in (429, 403) and use_pool and is_gemini and attempt < attempts - 1:
-                    log.warning("OpenRouter %d на попытке %d, ротация ключа...", resp.status, attempt)
+                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                if resp.status in (429, 403) and attempt < attempts - 1:
+                    log.warning("Gemini %d попытка %d, ротация...", resp.status, attempt)
                     continue
-                else:
-                    try:
-                        err = (await resp.json()).get("error", {}).get("message", "")
-                    except Exception:
-                        err = await resp.text()
-                    if resp.status == 429:
-                        return "Блять завал погоди."
-                    if resp.status in (401, 403):
-                        return f"Нет доступа к модели ({resp.status}). Проверь ключ OpenRouter 🔑"
-                    return f"Ошибка API {resp.status}: {err[:300]}"
-
+                try:
+                    err = (await resp.json()).get("error", {}).get("message", "")
+                except Exception:
+                    err = await resp.text()
+                if resp.status == 429:
+                    return "Лимит Gemini, подожди минуту."
+                return f"Ошибка Gemini {resp.status}: {err[:200]}"
         except asyncio.TimeoutError:
             if attempt < attempts - 1:
                 continue
-            return "Таймаут, я устала."
+            return "Таймаут Gemini."
         except Exception as e:
-            return f"Ошибка соединения: {e} 🌐"
+            return f"Ошибка соединения: {e}"
+    return "Все Gemini-ключи исчерпаны."
 
-    return "Все ключи исчерпаны, попробуй позже ⚠️"
+
+async def _or_post(session: aiohttp.ClientSession, payload: dict) -> str:
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {Secrets.OPENROUTER_KEY}",
+    }
+    try:
+        async with session.post(
+            Secrets.OPENROUTER_URL, headers=headers,
+            json=payload, timeout=TIMEOUT_OR,
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data["choices"][0]["message"]["content"]
+            try:
+                err = (await resp.json()).get("error", {}).get("message", "")
+            except Exception:
+                err = await resp.text()
+            if resp.status == 429:
+                return "OpenRouter перегружен."
+            if resp.status in (401, 403):
+                return f"Нет доступа OpenRouter ({resp.status})."
+            return f"Ошибка OpenRouter {resp.status}: {err[:200]}"
+    except asyncio.TimeoutError:
+        return "Таймаут OpenRouter."
+    except Exception as e:
+        return f"Ошибка соединения: {e}"
+
+
+async def _post(session: aiohttp.ClientSession, payload: dict) -> str:
+    model = payload.get("model", "")
+    if "gemini" in model.lower():
+        return await _gemini_post(session, payload["messages"], model)
+    return await _or_post(session, payload)
 
 
 async def chat(session: aiohttp.ClientSession, uid: str, text: str,
@@ -273,7 +325,7 @@ async def chat(session: aiohttp.ClientSession, uid: str, text: str,
         "messages":   messages,
     }
 
-    answer = await _or_post(session, payload)
+    answer = await _post(session, payload)
     mem.push(uid, "user",      text)
     mem.push(uid, "assistant", answer)
     return answer
@@ -300,7 +352,7 @@ async def chat_vision(session: aiohttp.ClientSession, uid: str,
         "messages":   messages,
     }
 
-    answer = await _or_post(session, payload)
+    answer = await _post(session, payload)
     mem.push(uid, "user",      f"[Изображение] {text}")
     mem.push(uid, "assistant", answer)
     return answer
@@ -323,17 +375,13 @@ async def transcribe(session: aiohttp.ClientSession,
             ],
         }],
     }
-    return await _or_post(session, payload, use_pool=False)
+    return await _or_post(session, payload)
 
 
 async def draw(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
-    clean = re.sub(r"^[Нн]арисуй\s*", "", prompt).strip()
-    url   = Secrets.POLLINATIONS_URL.format(
-        prompt=aiohttp.ClientSession._request.__func__.__module__  # just for import check
-    )
-    # Строим URL вручную
     from urllib.parse import quote
-    url = Secrets.POLLINATIONS_URL.replace("{prompt}", quote(clean))
+    clean = re.sub(r"^[Нн]арисуй\s*", "", prompt).strip()
+    url   = Secrets.POLLINATIONS_URL.replace("{prompt}", quote(clean))
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=90)) as resp:
             if resp.status == 200:
@@ -356,7 +404,7 @@ async def extract_fact_bg(session: aiohttp.ClientSession, uid: str, text: str):
         "max_tokens": 60,
         "messages":   [{"role": "user", "content": prompt}],
     }
-    result = await _or_post(session, payload, use_pool=False)
+    result = await _or_post(session, payload)
     if result and result.strip().upper() != "НЕТ" and len(result.strip()) < 200:
         mem.add_fact(uid, result.strip())
 
@@ -608,15 +656,12 @@ class SessionMiddleware(BaseMiddleware):
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 async def main():
-    if not Secrets.TG_BOT_TOKEN:
-        log.error("TG_BOT_TOKEN не задан в переменных окружения! Выход.")
+    if "ВСТАВЬ_ТОКЕН" in Secrets.TG_BOT_TOKEN or not Secrets.TG_BOT_TOKEN:
+        log.error("Не заполнен TG_BOT_TOKEN в классе Secrets! Выход.")
         sys.exit(1)
 
-    if not Secrets.OPENROUTER_KEY:
-        log.warning("OPENROUTER_KEY не задан — Llama/Whisper работать не будут!")
-
-    if not Secrets.GEMINI_POOL:
-        log.warning("GEMINI_1..15 не заданы — Gemini работать не будет!")
+    if "ВСТАВЬ_СЮДА" in Secrets.OPENROUTER_KEY or not Secrets.OPENROUTER_KEY:
+        log.warning("OPENROUTER_KEY не заполнен — запросы к LLM не будут работать!")
 
     async with aiohttp.ClientSession() as session:
         dp.update.middleware(SessionMiddleware(session))
