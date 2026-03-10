@@ -691,6 +691,16 @@ async def dl(file_id: str) -> bytes:
     return buf.getvalue()
 
 
+async def _typing_loop(chat_id: int, stop: asyncio.Event):
+    """Шлёт статус печатает каждые 4с."""
+    while not stop.is_set():
+        try:
+            await bot.send_chat_action(chat_id, ChatAction.TYPING)
+        except Exception:
+            pass
+        await asyncio.sleep(4)
+
+
 def _auto_gender(uid_str: str, text: str):
     g = detect_gender(text)
     if g: mem.update_gender(uid_str, g)
