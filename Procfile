@@ -1,0 +1,1 @@
+worker: python murka_bot.py
