@@ -52,20 +52,40 @@ log = logging.getLogger("murka_bot")
 # KEY MANAGER
 # ══════════════════════════════════════════════════════════════════════════════
 class KeyManager:
+    COOLDOWN = 60  # секунд после 429 не трогать ключ
+
     def __init__(self, pool: list[str]):
-        self._pool = [k for k in pool if k and len(k) > 20]
-        self._idx  = 0
+        self._pool     = [k for k in pool if k and len(k) > 20]
+        self._idx      = 0
+        self._cooldown: dict[int, float] = {}  # idx -> время до которого ключ на кулдауне
         if not self._pool:
             log.warning("GEMINI_POOL пуст!")
+
+    def _is_cool(self, idx: int) -> bool:
+        import time
+        until = self._cooldown.get(idx, 0)
+        return time.monotonic() < until
+
+    def mark_429(self, idx: int):
+        import time
+        self._cooldown[idx] = time.monotonic() + self.COOLDOWN
+        log.info("Ключ #%d на кулдауне %ds", idx, self.COOLDOWN)
 
     def current(self) -> str:
         return self._pool[self._idx % len(self._pool)] if self._pool else ""
 
-    def rotate(self) -> str:
+    def next_available(self) -> str:
+        """Возвращает следующий ключ не на кулдауне, или пустую строку если все заняты."""
         if not self._pool: return ""
-        self._idx = (self._idx + 1) % len(self._pool)
-        log.info("Gemini ротация -> ключ #%d", self._idx)
-        return self._pool[self._idx]
+        for _ in range(len(self._pool)):
+            self._idx = (self._idx + 1) % len(self._pool)
+            if not self._is_cool(self._idx):
+                log.info("Gemini ротация -> ключ #%d", self._idx)
+                return self._pool[self._idx]
+        return ""  # все на кулдауне
+
+    def rotate(self) -> str:
+        return self.next_available()
 
     def __len__(self): return len(self._pool)
 
@@ -390,10 +410,17 @@ async def _gemini_post(session: aiohttp.ClientSession,
         body["system_instruction"] = {"parts": [{"text": system_text}]}
     attempts = max(len(_keys), 1)
     for attempt in range(attempts):
-        if attempt > 0:
-            _keys.rotate()
-        key = _keys.current()
-        if not key: return _fallback()
+        if attempt == 0:
+            # первая попытка — если текущий ключ на кулдауне, сразу берём следующий
+            if _keys._is_cool(_keys._idx):
+                key = _keys.next_available()
+            else:
+                key = _keys.current()
+        else:
+            key = _keys.next_available()
+        if not key:
+            log.warning("Все Gemini ключи на кулдауне")
+            return _fallback()
         try:
             async with session.post(
                 url, json=body, timeout=TIMEOUT_G,
@@ -404,8 +431,7 @@ async def _gemini_post(session: aiohttp.ClientSession,
                     data = await resp.json()
                     return data["candidates"][0]["content"]["parts"][0]["text"]
                 if resp.status == 429:
-                    log.warning("Gemini 429 key#%d, жду 2с", _keys._idx)
-                    await asyncio.sleep(2)
+                    _keys.mark_429(_keys._idx)
                 else:
                     log.warning("Gemini %d key#%d", resp.status, _keys._idx)
                 continue
