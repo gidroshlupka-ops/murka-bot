@@ -59,66 +59,102 @@ log = logging.getLogger("murka_bot")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# KEY MANAGER
+# KEY MANAGER  (v2 — умная ротация без ложного "выжигания" ключей)
 # ══════════════════════════════════════════════════════════════════════════════
 class KeyManager:
-    COOLDOWN    = 65   # секунд после 429 (Gemini free = 10 RPM, 60s окно)
-    MIN_INTERVAL = 6   # минимум секунд между запросами на один ключ (10 RPM = 1 req/6s)
+    # После реального 429 — ключ отдыхает 65 с (окно Gemini free = 60 с)
+    COOLDOWN     = 65
+    # MIN_INTERVAL убран из жёсткой блокировки: теперь он только advisory.
+    # Реальный глобальный rate-limit обеспечивается asyncio.Lock в _gemini_post.
+    # Без этого при 20 ключах next_available() прокручивал ВЕСЬ пул за один
+    # вызов (все ключи "тёплые"), получал "" и падал на фолбек.
+    MIN_INTERVAL = 6   # секунд — используется только для логирования
 
     def __init__(self, pool: list[str]):
         self._pool      = [k for k in pool if k and len(k) > 20]
+        # _idx — текущий рабочий ключ; НЕ инкрементируем при каждом вызове,
+        # только когда получаем реальную ошибку с этого ключа.
         self._idx       = 0
-        self._cooldown: dict[int, float] = {}  # 429 кулдаун
-        self._last_used: dict[int, float] = {}  # когда последний раз использован
+        self._cooldown: dict[int, float] = {}   # time.monotonic() истечения 429-бана
+        self._last_used: dict[int, float] = {}  # time.monotonic() последнего использования
+        self._err_count: dict[int, int]   = {}  # счётчик подряд идущих ошибок (не 429)
         if not self._pool:
             log.warning("GEMINI_POOL пуст!")
+        else:
+            log.info("KeyManager: %d ключей в пуле", len(self._pool))
 
-    def _is_cool(self, idx: int) -> bool:
-        """Ключ на кулдауне после 429."""
+    def _is_banned(self, idx: int) -> bool:
+        """True — ключ на жёстком 429-кулдауне."""
         return time.monotonic() < self._cooldown.get(idx, 0)
 
-    def _is_ready(self, idx: int) -> bool:
-        """Ключ готов — не на кулдауне и прошло MIN_INTERVAL с последнего использования."""
-        if self._is_cool(idx):
-            return False
-        return time.monotonic() >= self._last_used.get(idx, 0) + self.MIN_INTERVAL
-
-    def mark_429(self, idx: int):
+    def ban_429(self, idx: int):
+        """Вызывается ТОЛЬКО при HTTP 429 от Google."""
         self._cooldown[idx] = time.monotonic() + self.COOLDOWN
-        log.info("Ключ #%d на кулдауне %ds", idx, self.COOLDOWN)
+        remaining = self.COOLDOWN
+        log.info("Ключ #%d → 429-бан на %ds", idx, remaining)
 
     def mark_used(self, idx: int):
         self._last_used[idx] = time.monotonic()
+        self._err_count[idx] = 0  # сброс счётчика ошибок при успехе
 
-    def current(self) -> str:
-        return self._pool[self._idx % len(self._pool)] if self._pool else ""
+    def mark_error(self, idx: int):
+        """Не-429 ошибка (5xx, таймаут). Три подряд — мягкий кулдаун 10 с."""
+        self._err_count[idx] = self._err_count.get(idx, 0) + 1
+        if self._err_count[idx] >= 3:
+            soft_cd = 10.0
+            self._cooldown[idx] = time.monotonic() + soft_cd
+            log.warning("Ключ #%d → мягкий бан %ds (3 ошибки подряд)", idx, soft_cd)
+            self._err_count[idx] = 0
 
-    def next_available(self) -> str:
-        """Берёт следующий готовый ключ (не на кулдауне и не перегретый)."""
-        if not self._pool: return ""
-        # сначала ищем полностью готовый ключ
-        for _ in range(len(self._pool)):
-            self._idx = (self._idx + 1) % len(self._pool)
-            if self._is_ready(self._idx):
-                log.info("Gemini ротация -> ключ #%d", self._idx)
-                self.mark_used(self._idx)
-                return self._pool[self._idx]
-        # если все недавно использованы — берём любой не на 429-кулдауне
-        for _ in range(len(self._pool)):
-            self._idx = (self._idx + 1) % len(self._pool)
-            if not self._is_cool(self._idx):
-                log.info("Gemini ротация (warm) -> ключ #%d", self._idx)
-                self.mark_used(self._idx)
-                return self._pool[self._idx]
-        return ""
+    def current_key(self) -> tuple[int, str]:
+        """Текущий ключ без ротации."""
+        idx = self._idx % len(self._pool)
+        return idx, self._pool[idx] if self._pool else (0, "")
+
+    def pick_best(self) -> tuple[int, str]:
+        """
+        Выбирает лучший доступный ключ по приоритету:
+        1. Текущий (_idx), если не забанен — возвращаем его же (не ротируем зря).
+        2. Следующий не забаненный в пуле.
+        3. Ключ с минимальным оставшимся кулдауном (ждём его).
+        Возвращает (idx, key) или (-1, "").
+        """
+        if not self._pool:
+            return -1, ""
+
+        n = len(self._pool)
+        cur = self._idx % n
+
+        # 1. текущий ключ не забанен → используем его
+        if not self._is_banned(cur):
+            return cur, self._pool[cur]
+
+        # 2. ищем ближайший не забаненный (в порядке round-robin от cur+1)
+        for offset in range(1, n):
+            candidate = (cur + offset) % n
+            if not self._is_banned(candidate):
+                self._idx = candidate
+                log.info("Ротация ключа: #%d → #%d", cur, candidate)
+                return candidate, self._pool[candidate]
+
+        # 3. все забанены — возвращаем -1 (вызывающий код решит, ждать или сдаться)
+        return -1, ""
 
     def next_cooldown_end(self) -> float:
-        """Когда освободится ближайший ключ."""
-        now = time.monotonic()
+        """Когда освободится ближайший ключ (time.monotonic())."""
+        now   = time.monotonic()
         times = [self._cooldown.get(i, 0) for i in range(len(self._pool))]
         return min((t for t in times if t > now), default=0)
 
+    # Совместимость с кодом, который вызывал next_available() / rotate()
+    def next_available(self) -> str:
+        _, key = self.pick_best()
+        return key
+
     def rotate(self) -> str:
+        # принудительная ротация (пропустить текущий)
+        if self._pool:
+            self._idx = (self._idx + 1) % len(self._pool)
         return self.next_available()
 
     def __len__(self): return len(self._pool)
@@ -651,14 +687,18 @@ def _to_gemini(messages: list) -> tuple:
 async def _gemini_post(session: aiohttp.ClientSession,
                        messages: list, model: str) -> str:
     global _gemini_sem, _gemini_lock, _gemini_last_request
-    # ленивая инициализация asyncio примитивов (нужен живой event loop)
+    # Ленивая инициализация asyncio-примитивов (нужен живой event loop)
     if _gemini_lock is None:
         _gemini_lock = asyncio.Lock()
     if _gemini_sem is None:
-        _gemini_sem = asyncio.Semaphore(2)
+        # 3 параллельных запроса: при 3 пользователях это адекватно,
+        # при этом не сжигаем все ключи за один "шторм" сообщений
+        _gemini_sem = asyncio.Semaphore(3)
 
     async with _gemini_sem:
-        # глобальный rate limit: не чаще 1 запроса в секунду суммарно
+        # Глобальный rate-limit: минимум 1 с между запросами (суммарно по всем ключам).
+        # Это единственный реальный ограничитель частоты — MIN_INTERVAL в KeyManager убран,
+        # чтобы не приводил к ложной "занятости" ключей.
         async with _gemini_lock:
             now  = time.monotonic()
             wait = 1.0 - (now - _gemini_last_request)
@@ -682,23 +722,30 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
     }
     if system_text:
         body["system_instruction"] = {"parts": [{"text": system_text}]}
-    attempts = max(len(_keys), 1)
-    for attempt in range(attempts):
-        if attempt == 0:
-            key = _keys.next_available() if _keys._is_cool(_keys._idx) else _keys.current()
-        else:
-            key = _keys.next_available()
-        if not key:
-            # все ключи на кулдауне — ждём сброса вместо немедленного фолбека
-            end = _keys.next_cooldown_end()
+
+    # Максимум попыток = кол-во ключей, но не устраиваем тур по всему пулу зря.
+    # Если ключ вернул 200 — выходим сразу. Если 429 — баним и берём следующий.
+    # Если не-429 ошибка — логируем полный текст и пробуем ещё раз тот же ключ
+    # (возможно временный сбой). После 2 неуспешных попыток — ротируем.
+    max_key_switches = min(len(_keys), 5)  # переключаем ключ не более 5 раз
+    switched = 0
+    local_attempt = 0  # попыток с текущим ключом
+
+    while switched <= max_key_switches:
+        idx, key = _keys.pick_best()
+
+        if idx == -1 or not key:
+            # все ключи на кулдауне — ждём освобождения ближайшего
+            end  = _keys.next_cooldown_end()
             wait = end - time.monotonic()
             if 0 < wait < 70:
-                log.info("Все ключи на кулдауне, жду %.1fs", wait)
+                log.info("Все Gemini ключи на кулдауне, жду %.1fs", wait)
                 await asyncio.sleep(wait + 1.0)
-                key = _keys.next_available()
-            if not key:
+                idx, key = _keys.pick_best()
+            if idx == -1 or not key:
                 log.warning("Все Gemini ключи на кулдауне, сдаюсь")
                 return _fallback()
+
         try:
             async with session.post(
                 url, json=body, timeout=TIMEOUT_G,
@@ -707,33 +754,99 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
+                    _keys.mark_used(idx)
                     return data["candidates"][0]["content"]["parts"][0]["text"]
+
+                # --- читаем тело ответа для диагностики ---
+                err_body = await resp.text()
+                log.warning(
+                    "Gemini HTTP %d | ключ #%d | тело: %s",
+                    resp.status, idx, err_body[:400],
+                )
+
                 if resp.status == 429:
-                    _keys.mark_429(_keys._idx)
-                else:
-                    log.warning("Gemini %d key#%d", resp.status, _keys._idx)
-                continue
+                    _keys.ban_429(idx)
+                    # принудительно двигаемся на следующий ключ
+                    _keys._idx = (idx + 1) % len(_keys._pool)
+                    switched  += 1
+                    local_attempt = 0
+                    continue
+
+                if resp.status in (500, 502, 503, 504):
+                    # временный сбой сервера — пробуем ещё раз тот же ключ
+                    local_attempt += 1
+                    if local_attempt >= 2:
+                        _keys.mark_error(idx)
+                        _keys._idx = (idx + 1) % len(_keys._pool)
+                        switched  += 1
+                        local_attempt = 0
+                    await asyncio.sleep(2)
+                    continue
+
+                # 400 / 403 / другой клиентский код — не ротируем ключ,
+                # это скорее всего проблема запроса, а не ключа
+                log.error("Gemini клиентская ошибка %d, прекращаю попытки", resp.status)
+                return _fallback()
+
         except asyncio.TimeoutError:
-            log.warning("Gemini timeout key#%d", _keys._idx)
+            log.warning("Gemini timeout ключ #%d", idx)
+            local_attempt += 1
+            if local_attempt >= 2:
+                _keys.mark_error(idx)
+                _keys._idx = (idx + 1) % len(_keys._pool)
+                switched  += 1
+                local_attempt = 0
             continue
         except Exception as e:
-            log.error("Gemini exc: %s", e)
+            log.error("Gemini exc ключ #%d: %s", idx, e)
+            local_attempt += 1
+            if local_attempt >= 2:
+                _keys.mark_error(idx)
+                _keys._idx = (idx + 1) % len(_keys._pool)
+                switched  += 1
+                local_attempt = 0
             continue
+
+    log.warning("Gemini: исчерпаны попытки (switched=%d)", switched)
     return _fallback()
 
 
 async def _or_post(session: aiohttp.ClientSession, payload: dict) -> str:
+    """POST к OpenRouter. Совместим с OpenAI API."""
+    # Обязательные заголовки OpenRouter:
+    # - Authorization: Bearer <key>
+    # - HTTP-Referer: идентифицирует приложение (без него часто 400/403)
+    # - X-Title: отображается в дашборде OR (опционально, но желательно)
+    or_headers = {
+        "Content-Type":  "application/json",
+        "Authorization": f"Bearer {Secrets.OPENROUTER_KEY}",
+        "HTTP-Referer":  "https://t.me/murka_bot",   # ← FIX: обязателен для OR
+        "X-Title":       "MurkaBot",
+    }
+    # OR требует только поля, совместимые с OpenAI.
+    # Убираем лишние ключи, которые OR не понимает и возвращает 400.
+    clean_payload = {
+        "model":       payload.get("model", Secrets.MODEL_LLAMA),
+        "messages":    payload["messages"],
+        "max_tokens":  payload.get("max_tokens", 500),
+        "temperature": payload.get("temperature", 0.9),
+    }
     try:
         async with session.post(
-            Secrets.OPENROUTER_URL, json=payload, timeout=TIMEOUT_OR,
-            headers={"Content-Type":  "application/json",
-                     "Authorization": f"Bearer {Secrets.OPENROUTER_KEY}"},
+            Secrets.OPENROUTER_URL, json=clean_payload,
+            timeout=TIMEOUT_OR, headers=or_headers,
         ) as resp:
             if resp.status == 200:
-                return (await resp.json())["choices"][0]["message"]["content"]
-            log.error("OR %d", resp.status); return _fallback()
+                data = await resp.json()
+                return data["choices"][0]["message"]["content"]
+            # читаем тело — без него "OR 400" ни о чём не говорит
+            err_body = await resp.text()
+            log.error("OR %d | модель=%s | тело: %s",
+                      resp.status, clean_payload["model"], err_body[:400])
+            return _fallback()
     except Exception as e:
-        log.error("OR exc: %s", e); return _fallback()
+        log.error("OR exc: %s", e)
+        return _fallback()
 
 
 async def _post(session: aiohttp.ClientSession, payload: dict) -> str:
@@ -2177,7 +2290,26 @@ async def main():
         dp.update.middleware(SessionMiddleware(session))
         dp.update.outer_middleware(AccessMiddleware())
         log.info("Murka Bot v8 запущена")
-        await dp.start_polling(bot, skip_updates=True)
+        # skip_updates=True + drop_pending_updates предотвращают TelegramConflictError на Railway:
+        # при рестарте контейнера старый процесс может ещё держать сессию.
+        # drop_pending_updates сбрасывает накопившуюся очередь при старте.
+        while True:
+            try:
+                await dp.start_polling(
+                    bot,
+                    skip_updates=True,
+                    drop_pending_updates=True,
+                    allowed_updates=dp.resolve_used_update_types(),
+                )
+                break  # нормальное завершение
+            except Exception as e:
+                err_str = str(e)
+                if "Conflict" in err_str or "terminated by other getUpdates" in err_str:
+                    log.warning("TelegramConflictError: другой экземпляр бота? Жду 5с и рестартую polling...")
+                    await asyncio.sleep(5)
+                    continue
+                log.exception("polling упал с неизвестной ошибкой")
+                raise
 
 
 if __name__ == "__main__":
