@@ -591,6 +591,8 @@ def _fmt(text: str) -> str:
 
 
 async def send_smart(msg: Message, text: str):
+    if not text or not text.strip():
+        return  # ответ был только стикером — текст пустой, ничего не слать
     formatted = _fmt(text)
     MAX = 4000
     if len(formatted) <= MAX:
