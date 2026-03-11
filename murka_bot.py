@@ -647,6 +647,8 @@ _GENDER_FIXES = [
 
 def _fix_gender(text: str) -> str:
     """Хардкорная постобработка — заменяет мужской род на женский."""
+    if not text or not isinstance(text, str):
+        return text or ""
     for pattern, repl in _GENDER_FIXES:
         text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
     return text
@@ -738,11 +740,21 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
     switched = 0
     local_attempt = 0  # попыток с текущим ключом
 
+    # Если все ключи уже на длинном (24ч) бане — сразу сдаёмся, не ждём
+    now = time.monotonic()
+    all_banned_long = all(
+        _keys._cooldown.get(i, 0) - now > 3600
+        for i in range(len(_keys._pool))
+    ) if _keys._pool else False
+    if all_banned_long:
+        log.warning("Все Gemini ключи на 24ч бане, сразу фолбек")
+        return _fallback()
+
     while switched <= max_key_switches:
         idx, key = _keys.pick_best()
 
         if idx == -1 or not key:
-            # все ключи на кулдауне — ждём освобождения ближайшего
+            # все ключи на кулдауне — ждём только если кулдаун короткий (< 70с)
             end  = _keys.next_cooldown_end()
             wait = end - time.monotonic()
             if 0 < wait < 70:
@@ -875,6 +887,21 @@ async def _or_post(session: aiohttp.ClientSession, payload: dict) -> str:
                 return data["choices"][0]["message"]["content"]
             err_body = await resp.text()
             log.error("OR %d | модель=%s | тело: %s", resp.status, model, err_body[:400])
+            if resp.status == 429:
+                # провайдер перегружен — ждём 3с и пробуем ещё раз
+                await asyncio.sleep(3)
+                try:
+                    async with session.post(
+                        Secrets.OPENROUTER_URL, json=clean_payload,
+                        timeout=TIMEOUT_OR, headers=or_headers,
+                    ) as resp2:
+                        if resp2.status == 200:
+                            data2 = await resp2.json()
+                            return data2["choices"][0]["message"]["content"]
+                        err2 = await resp2.text()
+                        log.error("OR retry %d | тело: %s", resp2.status, err2[:200])
+                except Exception as e2:
+                    log.error("OR retry exc: %s", e2)
             return _fallback()
     except Exception as e:
         log.error("OR exc: %s", e)
