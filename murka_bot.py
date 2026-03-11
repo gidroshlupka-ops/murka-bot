@@ -51,7 +51,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     handlers=[
-        logging.StreamHandler(sys.stdout),  # Railway логи — только stdout
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("murka_bot.log", encoding="utf-8"),
     ]
 )
 log = logging.getLogger("murka_bot")
@@ -61,33 +62,61 @@ log = logging.getLogger("murka_bot")
 # KEY MANAGER
 # ══════════════════════════════════════════════════════════════════════════════
 class KeyManager:
-    COOLDOWN = 60  # секунд после 429 не трогать ключ
+    COOLDOWN    = 65   # секунд после 429 (Gemini free = 10 RPM, 60s окно)
+    MIN_INTERVAL = 6   # минимум секунд между запросами на один ключ (10 RPM = 1 req/6s)
 
     def __init__(self, pool: list[str]):
-        self._pool     = [k for k in pool if k and len(k) > 20]
-        self._idx      = 0
-        self._cooldown: dict[int, float] = {}
+        self._pool      = [k for k in pool if k and len(k) > 20]
+        self._idx       = 0
+        self._cooldown: dict[int, float] = {}  # 429 кулдаун
+        self._last_used: dict[int, float] = {}  # когда последний раз использован
         if not self._pool:
             log.warning("GEMINI_POOL пуст!")
 
     def _is_cool(self, idx: int) -> bool:
+        """Ключ на кулдауне после 429."""
         return time.monotonic() < self._cooldown.get(idx, 0)
+
+    def _is_ready(self, idx: int) -> bool:
+        """Ключ готов — не на кулдауне и прошло MIN_INTERVAL с последнего использования."""
+        if self._is_cool(idx):
+            return False
+        return time.monotonic() >= self._last_used.get(idx, 0) + self.MIN_INTERVAL
 
     def mark_429(self, idx: int):
         self._cooldown[idx] = time.monotonic() + self.COOLDOWN
         log.info("Ключ #%d на кулдауне %ds", idx, self.COOLDOWN)
 
+    def mark_used(self, idx: int):
+        self._last_used[idx] = time.monotonic()
+
     def current(self) -> str:
         return self._pool[self._idx % len(self._pool)] if self._pool else ""
 
     def next_available(self) -> str:
+        """Берёт следующий готовый ключ (не на кулдауне и не перегретый)."""
         if not self._pool: return ""
+        # сначала ищем полностью готовый ключ
+        for _ in range(len(self._pool)):
+            self._idx = (self._idx + 1) % len(self._pool)
+            if self._is_ready(self._idx):
+                log.info("Gemini ротация -> ключ #%d", self._idx)
+                self.mark_used(self._idx)
+                return self._pool[self._idx]
+        # если все недавно использованы — берём любой не на 429-кулдауне
         for _ in range(len(self._pool)):
             self._idx = (self._idx + 1) % len(self._pool)
             if not self._is_cool(self._idx):
-                log.info("Gemini ротация -> ключ #%d", self._idx)
+                log.info("Gemini ротация (warm) -> ключ #%d", self._idx)
+                self.mark_used(self._idx)
                 return self._pool[self._idx]
         return ""
+
+    def next_cooldown_end(self) -> float:
+        """Когда освободится ближайший ключ."""
+        now = time.monotonic()
+        times = [self._cooldown.get(i, 0) for i in range(len(self._pool))]
+        return min((t for t in times if t > now), default=0)
 
     def rotate(self) -> str:
         return self.next_available()
@@ -95,7 +124,11 @@ class KeyManager:
     def __len__(self): return len(self._pool)
 
 
+
 _keys = KeyManager(Secrets.GEMINI_POOL)
+# Семафор — не более 3 параллельных запросов к Gemini
+# Без него при старте 10+ сообщений прилетают одновременно и сжигают все ключи
+_gemini_sem = asyncio.Semaphore(3)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -615,6 +648,12 @@ def _to_gemini(messages: list) -> tuple:
 
 async def _gemini_post(session: aiohttp.ClientSession,
                        messages: list, model: str) -> str:
+    async with _gemini_sem:  # не более 3 параллельных запросов
+        return await _gemini_post_inner(session, messages, model)
+
+
+async def _gemini_post_inner(session: aiohttp.ClientSession,
+                              messages: list, model: str) -> str:
     gem_msgs, system_text = _to_gemini(messages)
     model_name = model.split("/")[-1]
     url  = GEMINI_URL.format(model=model_name)
@@ -634,8 +673,16 @@ async def _gemini_post(session: aiohttp.ClientSession,
         else:
             key = _keys.next_available()
         if not key:
-            log.warning("Все Gemini ключи на кулдауне")
-            return _fallback()
+            # все ключи на кулдауне — ждём сброса вместо немедленного фолбека
+            end = _keys.next_cooldown_end()
+            wait = end - time.monotonic()
+            if 0 < wait < 70:
+                log.info("Все ключи на кулдауне, жду %.1fs", wait)
+                await asyncio.sleep(wait + 1.0)
+                key = _keys.next_available()
+            if not key:
+                log.warning("Все Gemini ключи на кулдауне, сдаюсь")
+                return _fallback()
         try:
             async with session.post(
                 url, json=body, timeout=TIMEOUT_G,
@@ -1891,7 +1938,33 @@ async def on_video(msg: Message, aiohttp_session: aiohttp.ClientSession):
         await msg.answer(_fallback())
 
 
-# ── поиск картинок ──────────────────────────────────
+# ── поиск картинок через inline-бота @pic ──────────────────────────────────
+async def search_and_send_pic(msg: Message, query: str) -> bool:
+    """Ищет картинку через Pollinations image endpoint и отправляет.
+    get_inline_bot_results требует inline mode — используем генерацию через pollinations
+    как "поиск" (быстро, бесплатно).
+    """
+    from urllib.parse import quote
+    try:
+        encoded = quote(query)
+        seed    = random.randint(1, 999999)
+        # используем модели которые дают реалистичные фото, не арт
+        url = f"https://image.pollinations.ai/prompt/{encoded}?width=800&height=800&nologo=true&nofeed=true&model=flux&seed={seed}"
+        async with msg._bot.session.get(   # type: ignore
+            url,
+            timeout=aiohttp.ClientTimeout(total=60),
+            headers={"User-Agent": "Mozilla/5.0"},
+            allow_redirects=True,
+        ) as r:
+            if r.status == 200:
+                ct   = r.headers.get("content-type", "")
+                data = await r.read()
+                if len(data) > 5000 and "image" in ct:
+                    await msg.answer_photo(BufferedInputFile(data, "pic.jpg"))
+                    return True
+    except Exception as e:
+        log.warning("search_and_send_pic fail: %s", e)
+    return False
 
 
 @dp.message(F.text)
