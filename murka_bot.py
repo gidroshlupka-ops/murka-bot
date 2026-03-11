@@ -31,7 +31,7 @@ class Secrets:
     MODEL_CHAT:    str = "google/gemini-2.5-flash-lite"
     MODEL_VISION:  str = "google/gemini-2.5-flash-lite"
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
-    MODEL_LLAMA:   str = "meta-llama/llama-4-scout:free"
+    MODEL_LLAMA:   str = "meta-llama/llama-3.1-8b-instruct:free"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -403,7 +403,11 @@ async def _gemini_post(session: aiohttp.ClientSession,
                 if resp.status == 200:
                     data = await resp.json()
                     return data["candidates"][0]["content"]["parts"][0]["text"]
-                log.warning("Gemini %d key#%d", resp.status, _keys._idx)
+                if resp.status == 429:
+                    log.warning("Gemini 429 key#%d, жду 2с", _keys._idx)
+                    await asyncio.sleep(2)
+                else:
+                    log.warning("Gemini %d key#%d", resp.status, _keys._idx)
                 continue
         except asyncio.TimeoutError:
             log.warning("Gemini timeout key#%d", _keys._idx)
@@ -411,6 +415,7 @@ async def _gemini_post(session: aiohttp.ClientSession,
         except Exception as e:
             log.error("Gemini exc: %s", e)
             continue
+    # все ключи исчерпаны — пробуем OpenRouter как запасной
     return _fallback()
 
 
@@ -430,7 +435,15 @@ async def _or_post(session: aiohttp.ClientSession, payload: dict) -> str:
 
 async def _post(session: aiohttp.ClientSession, payload: dict) -> str:
     if "gemini" in payload.get("model", "").lower():
-        return await _gemini_post(session, payload["messages"], payload["model"])
+        result = await _gemini_post(session, payload["messages"], payload["model"])
+        if result in _FALLBACKS and Secrets.OPENROUTER_KEY:
+            # Gemini недоступен — пробуем OpenRouter с llama как резерв
+            log.info("Gemini недоступен, пробую OpenRouter как резерв")
+            or_payload = {**payload, "model": Secrets.MODEL_LLAMA}
+            or_result = await _or_post(session, or_payload)
+            if or_result not in _FALLBACKS:
+                return or_result
+        return result
     return await _or_post(session, payload)
 
 
