@@ -70,18 +70,60 @@ class KeyManager:
     # вызов (все ключи "тёплые"), получал "" и падал на фолбек.
     MIN_INTERVAL = 6   # секунд — используется только для логирования
 
+    _BAN_DB = "gemini_bans.db"  # SQLite файл для персистентных банов
+
     def __init__(self, pool: list[str]):
         self._pool      = [k for k in pool if k and len(k) > 20]
-        # _idx — текущий рабочий ключ; НЕ инкрементируем при каждом вызове,
-        # только когда получаем реальную ошибку с этого ключа.
         self._idx       = 0
-        self._cooldown: dict[int, float] = {}   # time.monotonic() истечения 429-бана
-        self._last_used: dict[int, float] = {}  # time.monotonic() последнего использования
-        self._err_count: dict[int, int]   = {}  # счётчик подряд идущих ошибок (не 429)
+        self._cooldown: dict[int, float] = {}
+        self._last_used: dict[int, float] = {}
+        self._err_count: dict[int, int]   = {}
+        self._init_ban_db()
+        self._load_bans()
         if not self._pool:
             log.warning("GEMINI_POOL пуст!")
         else:
-            log.info("KeyManager: %d ключей в пуле", len(self._pool))
+            active = sum(1 for i in range(len(self._pool)) if not self._is_banned(i))
+            log.info("KeyManager: %d ключей в пуле, %d активных", len(self._pool), active)
+
+    def _init_ban_db(self):
+        import sqlite3 as _sq
+        with _sq.connect(self._BAN_DB) as c:
+            c.execute("""CREATE TABLE IF NOT EXISTS bans(
+                idx INTEGER PRIMARY KEY,
+                until_ts REAL NOT NULL)""")
+
+    def _load_bans(self):
+        """Загружаем баны из БД. Просроченные — игнорируем."""
+        import sqlite3 as _sq
+        now = time.monotonic()
+        # monotonic не переживает рестарт — конвертируем через wall clock
+        wall_now = time.time()
+        mono_now = now
+        try:
+            with _sq.connect(self._BAN_DB) as c:
+                rows = c.execute("SELECT idx, until_ts FROM bans").fetchall()
+            loaded = 0
+            for idx, until_wall in rows:
+                remaining = until_wall - wall_now
+                if remaining > 0:
+                    self._cooldown[idx] = mono_now + remaining
+                    loaded += 1
+            if loaded:
+                log.info("KeyManager: загружено %d активных банов из БД", loaded)
+        except Exception as e:
+            log.warning("KeyManager: не смог загрузить баны: %s", e)
+
+    def _save_ban(self, idx: int, duration: float):
+        """Сохраняем бан в БД (wall clock timestamp истечения)."""
+        import sqlite3 as _sq
+        until_wall = time.time() + duration
+        try:
+            with _sq.connect(self._BAN_DB) as c:
+                c.execute("INSERT OR REPLACE INTO bans(idx, until_ts) VALUES(?,?)",
+                          (idx, until_wall))
+        except Exception as e:
+            log.warning("KeyManager: не смог сохранить бан: %s", e)
 
     def _is_banned(self, idx: int) -> bool:
         """True — ключ на жёстком 429-кулдауне."""
@@ -91,14 +133,14 @@ class KeyManager:
         """Вызывается ТОЛЬКО при HTTP 429 от Google.
         Если лимит дневной (RPD) — баним на 24 ч, иначе на COOLDOWN (65 с).
         """
-        # "free_tier_requests" в теле = дневной лимит исчерпан
         if "free_tier" in err_body or "day" in err_body.lower():
-            cd = 86400.0  # 24 часа
+            cd = 86400.0
             log.warning("Ключ #%d → RPD-лимит исчерпан, бан на 24ч", idx)
         else:
             cd = float(self.COOLDOWN)
             log.info("Ключ #%d → 429-бан на %ds", idx, int(cd))
         self._cooldown[idx] = time.monotonic() + cd
+        self._save_ban(idx, cd)  # переживёт рестарт Railway
 
     def mark_used(self, idx: int):
         self._last_used[idx] = time.monotonic()
@@ -740,14 +782,11 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
     switched = 0
     local_attempt = 0  # попыток с текущим ключом
 
-    # Если все ключи уже на длинном (24ч) бане — сразу сдаёмся, не ждём
-    now = time.monotonic()
-    all_banned_long = all(
-        _keys._cooldown.get(i, 0) - now > 3600
-        for i in range(len(_keys._pool))
-    ) if _keys._pool else False
-    if all_banned_long:
-        log.warning("Все Gemini ключи на 24ч бане, сразу фолбек")
+    # Быстрая проверка до любых HTTP запросов:
+    # если pick_best() сразу возвращает -1 — все ключи забанены, идём в фолбек мгновенно
+    idx, key = _keys.pick_best()
+    if idx == -1 or not key:
+        log.warning("Все Gemini ключи забанены, сразу фолбек (без HTTP)")
         return _fallback()
 
     while switched <= max_key_switches:
