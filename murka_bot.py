@@ -390,7 +390,9 @@ async def _gemini_post(session: aiohttp.ClientSession,
         body["system_instruction"] = {"parts": [{"text": system_text}]}
     attempts = max(len(_keys), 1)
     for attempt in range(attempts):
-        key = _keys.current() if attempt == 0 else _keys.rotate()
+        if attempt > 0:
+            _keys.rotate()
+        key = _keys.current()
         if not key: return _fallback()
         try:
             async with session.post(
@@ -402,18 +404,13 @@ async def _gemini_post(session: aiohttp.ClientSession,
                     data = await resp.json()
                     return data["candidates"][0]["content"]["parts"][0]["text"]
                 log.warning("Gemini %d key#%d", resp.status, _keys._idx)
-                _keys.rotate()
-                if attempt < attempts - 1: continue
-                return _fallback()
+                continue
         except asyncio.TimeoutError:
-            _keys.rotate()
-            if attempt < attempts - 1: continue
-            return _fallback()
+            log.warning("Gemini timeout key#%d", _keys._idx)
+            continue
         except Exception as e:
             log.error("Gemini exc: %s", e)
-            _keys.rotate()
-            if attempt < attempts - 1: continue
-            return _fallback()
+            continue
     return _fallback()
 
 
@@ -449,8 +446,9 @@ async def ai_chat(session: aiohttp.ClientSession, uid_str: str, text: str,
         "model":      model or Secrets.MODEL_CHAT,
         "max_tokens": 2048, "messages": messages,
     })
-    mem.push(uid_str, "user",      text)
-    mem.push(uid_str, "assistant", answer)
+    if answer not in _FALLBACKS:
+        mem.push(uid_str, "user",      text)
+        mem.push(uid_str, "assistant", answer)
     return answer
 
 
@@ -466,8 +464,9 @@ async def ai_vision(session: aiohttp.ClientSession, uid_str: str,
     answer   = await _post(session, {
         "model": Secrets.MODEL_VISION, "max_tokens": 2048, "messages": messages,
     })
-    mem.push(uid_str, "user",      f"[фото] {text}")
-    mem.push(uid_str, "assistant", answer)
+    if answer not in _FALLBACKS:
+        mem.push(uid_str, "user",      f"[фото] {text}")
+        mem.push(uid_str, "assistant", answer)
     return answer
 
 
