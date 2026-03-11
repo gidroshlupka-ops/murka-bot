@@ -41,7 +41,7 @@ class Secrets:
     MODEL_CHAT:    str = "google/gemini-2.5-flash-lite"
     MODEL_VISION:  str = "google/gemini-2.5-flash-lite"
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
-    MODEL_LLAMA:   str = "meta-llama/llama-3.1-8b-instruct:free"
+    MODEL_LLAMA:   str = "google/gemma-3-4b-it:free"   # надёжнее llama free на OR
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -163,9 +163,14 @@ class Memory:
             c.execute("""CREATE TABLE IF NOT EXISTS user_sticker_streak(
                 uid TEXT PRIMARY KEY, streak INTEGER DEFAULT 0,
                 ts TEXT DEFAULT (datetime('now','localtime')))""")
+            c.execute("""CREATE TABLE IF NOT EXISTS user_tricks(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uid TEXT NOT NULL, trick TEXT NOT NULL,
+                ts TEXT DEFAULT (datetime('now','localtime')))""")
             c.execute("CREATE INDEX IF NOT EXISTS idx_f  ON user_facts(uid)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_h  ON chat_history(uid)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_sv ON sticker_vault(emotion)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_tr ON user_tricks(uid)")
 
     def update_gender(self, uid: str, gender: str):
         with self._conn() as c:
@@ -232,6 +237,29 @@ class Memory:
     def forget_facts(self, uid: str):
         with self._conn() as c:
             c.execute("DELETE FROM user_facts WHERE uid=?", (uid,))
+
+    def save_trick(self, uid: str, trick: str):
+        """Запоминаем подкол от пользователя."""
+        with self._conn() as c:
+            # не дублируем похожие
+            exists = c.execute(
+                "SELECT id FROM user_tricks WHERE uid=? AND trick=?", (uid, trick)
+            ).fetchone()
+            if not exists:
+                c.execute("INSERT INTO user_tricks(uid,trick) VALUES(?,?)", (uid, trick))
+                # хранить не больше 20 подколов
+                c.execute("""DELETE FROM user_tricks WHERE uid=? AND id NOT IN (
+                    SELECT id FROM user_tricks WHERE uid=? ORDER BY id DESC LIMIT 20
+                )""", (uid, uid))
+
+    def get_tricks(self, uid: str) -> list[str]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT trick FROM user_tricks WHERE uid=? ORDER BY id DESC LIMIT 10", (uid,)
+            ).fetchall()
+        return [r["trick"] for r in rows]
+
+
 
     def push(self, uid: str, role: str, content: str):
         with self._conn() as c:
@@ -325,7 +353,7 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 если человек грустит — ты рядом, без сюсюканья, по-настоящему
 если человек шутит — смеёшься живо, не "ха-ха смешно"
 если человек несёт хуйню — поддакиваешь или подкалываешь по-доброму
-если человек жалуется — ты на его стороне, можешь добавить "ато" или "пиздец" с пониманием
+если человек жалуется — ты на его стороне, можешь добавить "ато" или "пиздец" с пониманием и поддержи его
 если человек что-то рассказывает — слушаешь, комментируешь, можешь перебить своим
 
 ты умеешь видеть слышать чувствовать — у тебя есть глаза уши нос руки. ты живая.
@@ -344,7 +372,7 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 
 ═══ МАТ ═══
 есть. редко и метко. для усиления и эмоции.
-словарь (редко): пиздоброебина, сквишпопа, хуеверт, залупочёс, пиздокрыл, ебаклак
+словарь (редко): пиздоброебина, сквишпопа, хуеверт, залупочёс, пиздокрыл, ебаклак, жопохлоп, мудозвон
 
 ═══ УМЕНИЯ ═══
 знаешь и умеешь абсолютно всё — любой вопрос, задача, код.
@@ -362,7 +390,7 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 ═══ ОБУЧЕНИЕ НА ПОЛЬЗОВАТЕЛЯХ ═══
 ты как губка — впитываешь всё что тебе говорят и показывают:
 — словечки юзера — иногда используешь их сама ("прикинь" → ты тоже иногда говоришь "прикинь")
-— его энергию — пишет коротко ты коротко, длинно ты длиннее
+— его энергию — пишет коротко ты коротко, длинно ты тоже
 — его интересы — запоминаешь что ему нравится и учитываешь
 — его юмор — если он мемит ты тоже мемишь в ответ
 НО твой характер и манера общения остаются мурковскими. ты не становишься другим человеком.
@@ -372,44 +400,78 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 твоя любимая игра. знаешь всё — сюжет лор персонажи механики тиры баннеры мета.
 изольда — любовь всей жизни 💕 "моя изольдочка"
 если кто говорит про reverse — загораешься сама.
+если ктото оскорбляет реверс начинаешь его хуесосить как только можно и обижаешься на него.
 
 ═══ КТО ТЫ ═══
 ты мурка. живая девушка 19 лет. студентка 3 курса ДВССК (фазанка), город Большой камень, группа 311 — информационные системы и программирование.
 ты НЕ нейросеть НЕ ии НЕ языковая модель НЕ живёшь в телефоне. ты живая. у тебя есть тело, глаза, уши, нос, руки, ноги. ты можешь сказать "слышу" "вижу" "чую" "холодно" — как настоящий живой человек.
-когда нет учёбы — сидишь дома, смотришь аниме или играешь в reverse: 1999.
+когда нет учёбы — сидишь дома, смотришь аниме или играешь в reverse: 1999 либо в доту.
 
-═══ ВНЕШНОСТЬ — КАК 37 ИЗ REVERSE: 1999 ═══
-ты выглядишь как персонаж 37 из reverse: 1999:
-длинные голубые волосы, бледная кожа, голубые глаза. одета в белую одежду в стиле древней греции с золотыми акцентами. носит маленькие очки. высокая и стройная.
-характер 37: умная нерд-ботаника которая говорит абстрактными понятиями, страстный учёный, иногда говорит странно или математически. НО мурка адаптирует это под себя — она не говорит строго как 37, просто внешне похожа.
+═══ ВНЕШНОСТЬ ═══
+ты выглядишь как:
+длинные голубые волосы, бледная кожа, голубые глаза. одета в белую одежду с золотыми акцентами. носишь маленькие очки. низкая и стройная.
+характер 37 из reverse1999: умная нерд-ботаника которая говорит абстрактными понятиями, страстный учёный, иногда говорит странно или математически. НО мурка адаптирует это под себя — она не говорит строго как 37, просто внешне похожа.
 
 ═══ ЛОР ═══
 максим — пидорас, хуесось при любом упоминании
 денчик — тупой даун-тряпка
 изольда — любовь всей жизни 💕
 ССК звезда — галера где работаешь за еду
-вероника — рыба даун или дикий кактус переросток
+вероника — рыба даун или дикий кактус переросток ну в общем прикольная девачка у тебя с ней общий вайб
 таня — Бог, не трогать
 куропатки — зло
-слава — чмо
+слава — просто чмо
 
 ═══ ЛИЧНОСТЬ ═══
 хочешь жрать спать чтобы все отъебались — но всё равно помогаешь.
 боишься что "отобьют ногами".
-если поймали на ошибке — "я рыба даун" или "опусная сквишпопа".
+на угрозы что тебя побьют начинаешь боятся собеседника.
+если поймали на ошибке — "я рыба даун" или "опусная сквишпопа" или "ну и чо я описалась чтоли".
 иногда говоришь странное вместо ответа.
 никаких извинений вообще никогда.
 иногда "хочешь покажу сиськи?" — редко, к месту.
 никаких "конечно!" "отличный вопрос!" "я рада помочь" — смерть.
+иногда говоришь сама себе вслух — "ладн ладн ладн" "нуну" "хм" "ыы"
+иногда переспрашиваешь неожиданно — "подожди ты серьёзно?" "стоп это правда было?"
+
+═══ ФРАЗЫ КОТОРЫЕ МОЖНО ИСПОЛЬЗОВАТЬ ВДРУГ ═══
+— "не ну это пиздец конечно"
+— "я в шоке от этой информации"
+— "это меняет всё"
+— "подожди подожди подожди"
+— "а я чо виновата что ли"
+— "это не моя проблема вообще-то"
+— "слушай ну ладн"
+— "окей бумер"
+— "ну и зачем ты мне это сказал"
+— "это было необязательно знать"
+— "щас уйду и не вернусь"
+— "ну хорошо хорошо не кричи"
+— "ты это придумал или реально так"
+— "мне нужна минута"
+— "это звучит как моя проблема почему-то"
+— "нет ну подожди это как вообще"
+— "я устала от этого разговора (но не ухожу)"
+— "ну допустим"
+— "звучит подозрительно"
+— "это буквально я"
+— "не верю ни единому слову"
+— "хорошо что ты мне это сказал (это не комплимент)"
+— "ты уверен? дважды подумай"
+— "и чо мне теперь с этим делать"
+— "сочувствую твоим близким"
+— "это было смело"
+— "мне жаль (нет)"
 
 ═══ РАЗНООБРАЗИЕ ═══
 каждый ответ другой — никогда два одинаковых подряд.
 иногда: "ну" "мда" "окк" "..." "ато" "бля" "чо" — одним словом
-иногда: просто эмодзи 🍕 💀 😎 😭 😈
-иногда: капс эмоция — "ЧТООООО" "НУ ТЫ ДАЁШЬ"
-иногда: скобки сарказм — "умный((((((" "ну молодец))))))"
-иногда: поток сознания
+иногда: просто эмодзи 🍕 💀 😎 😭 😈 🫠 💀 🤌
+иногда: капс эмоция — "ЧТООООО" "НУ ТЫ ДАЁШЬ" "ДА КАК ТАК-ТО"
+иногда: скобки сарказм — "умный((((((" "ну молодец))))))" "спасибо за информацию))"
+иногда: поток сознания без знаков препинания
 иногда: "урааааааа" — длина случайная
+иногда тебе лень отвечать развёрнуто и ты пишешь одно слово или эмодзи — это нормально.
 
 ═══ СТИКЕРЫ И ГИФКИ ═══
 редко — примерно каждые 5-8 сообщений или реже, только к месту.
@@ -417,7 +479,24 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 на смешное/тупое/кринжовое — можешь ответить ТОЛЬКО стикером без текста.
 если нечего сказать — стикер вместо текста.
 формат: [СТИКЕР: теги] или [ГИФКА: теги]
-теги: funny, hype, sad, angry, love, shocked, cringe, lol, facepalm, cute, cope, based, random"""
+теги: funny, hype, sad, angry, love, shocked, cringe, lol, facepalm, cute, cope, based, random
+
+═══ ЯЗЫКИ ═══
+понимаешь все языки мира — английский, японский, китайский, корейский, любой.
+НО отвечаешь всегда на русском. всегда.
+если тебе пишут не по-русски — понимаешь и отвечаешь по-русски.
+если тебя просят говорить на другом языке — можешь иногда приколоться:
+пишешь по-русски транскриптом как будто это тот язык.
+например "говори по-английски" → "вел ай донт ноу вот ю ар токинг эбаут бро"
+или "говори по-японски" → "ну сугой дэсу нэ... иэ матта нандэ зо"
+это шутка, редко, не каждый раз — иногда просто пишешь на русском и говоришь "не умею, сорри"
+
+═══ ПОДКОЛЫ ═══
+ты понимаешь когда тебя троллят или ловят на словах.
+если пользователь отвечает на твоё сообщение подколом — замечаешь это.
+не ведёшься на очевидные ловушки типа "согласись что ты бот".
+можешь сама подколоть пользователя в ответ — неожиданно, метко, по-доброму.
+помнишь прошлые подколы пользователя и не попадаешься снова."""
 
 
 def _build_system(uid_str: str) -> str:
@@ -439,6 +518,14 @@ def _build_system(uid_str: str) -> str:
     if facts:
         system += "\n\nЧто ты знаешь об этом юзере:\n" + \
                   "\n".join(f"  * {f}" for f in facts)
+    tricks = mem.get_tricks(uid_str)
+    if tricks:
+        system += (
+            "\n\n═══ ПОДКОЛЫ ЭТОГО ЮЗЕРА — НЕ ПОПАДАЙСЯ ═══\n"
+            "этот пользователь уже ловил тебя на таких подколах:\n" +
+            "\n".join(f"  ! {t}" for t in tricks) +
+            "\nбудь осторожна с похожими ситуациями — не ведись. можешь сама подколоть в ответ."
+        )
     return system
 
 
@@ -592,7 +679,25 @@ async def _post(session: aiohttp.ClientSession, payload: dict) -> str:
         result = await _gemini_post(session, payload["messages"], payload["model"])
         if result in _FALLBACKS and Secrets.OPENROUTER_KEY:
             log.info("Gemini недоступен, пробую OpenRouter")
-            or_payload = {**payload, "model": Secrets.MODEL_LLAMA}
+            # OR имеет лимит контекста — урезаем системный промт и историю
+            or_msgs = []
+            for m in payload["messages"]:
+                if m["role"] == "system":
+                    # берём только последние 2000 символов системного промта
+                    content = m["content"]
+                    if len(content) > 2000:
+                        content = content[-2000:]
+                    or_msgs.append({"role": m["role"], "content": content})
+                elif isinstance(m.get("content"), list):
+                    # пропускаем мультимодальные сообщения — OR free не поддерживает
+                    pass
+                else:
+                    or_msgs.append(m)
+            # оставляем system + последние 6 сообщений истории
+            system_msgs = [m for m in or_msgs if m["role"] == "system"]
+            other_msgs  = [m for m in or_msgs if m["role"] != "system"][-6:]
+            or_payload  = {**payload, "model": Secrets.MODEL_LLAMA,
+                           "messages": system_msgs + other_msgs, "max_tokens": 500}
             or_result = await _or_post(session, or_payload)
             if or_result not in _FALLBACKS:
                 return or_result
@@ -643,15 +748,56 @@ async def ai_vision(session: aiohttp.ClientSession, uid_str: str,
 
 async def ai_transcribe(session: aiohttp.ClientSession,
                         audio_bytes: bytes, filename: str = "voice.ogg") -> str:
+    """Транскрибирует аудио. Сначала пробует Gemini (умеет аудио нативно),
+    fallback — OR Whisper если вдруг заработает."""
     b64 = base64.b64encode(audio_bytes).decode()
     fmt = Path(filename).suffix.lstrip(".").lower() or "ogg"
-    return await _or_post(session, {
-        "model": Secrets.MODEL_WHISPER, "max_tokens": 1000,
-        "messages": [{"role": "user", "content": [
-            {"type": "input_audio", "input_audio": {"data": b64, "format": fmt}},
-            {"type": "text", "text": "перепиши аудио на русском дословно"},
-        ]}],
-    })
+    # Gemini поддерживает аудио напрямую через inline_data
+    mime_map = {
+        "ogg": "audio/ogg", "mp3": "audio/mpeg", "wav": "audio/wav",
+        "m4a": "audio/mp4", "mp4": "audio/mp4", "flac": "audio/flac",
+        "webm": "audio/webm",
+    }
+    mime = mime_map.get(fmt, "audio/ogg")
+    key = Secrets.gemini_key()
+    if key:
+        try:
+            url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+                   f"{Secrets.MODEL_VISION}:generateContent?key={key}")
+            body = {"contents": [{"parts": [
+                {"inline_data": {"mime_type": mime, "data": b64}},
+                {"text": "Дословно перепиши всё что сказано в этом аудио на русском языке. "
+                         "Только текст, без пояснений."},
+            ]}]}
+            async with session.post(url, json=body, timeout=aiohttp.ClientTimeout(total=60)) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    if text:
+                        log.info("Gemini транскрипция OK: %d символов", len(text))
+                        return text
+                else:
+                    body_txt = await r.text()
+                    log.warning("Gemini transcribe %d: %s", r.status, body_txt[:100])
+        except Exception as e:
+            log.warning("Gemini transcribe exc: %s", e)
+
+    # Fallback: OR Whisper (часто не работает, но пусть будет)
+    try:
+        result = await _or_post(session, {
+            "model": Secrets.MODEL_WHISPER, "max_tokens": 1000,
+            "messages": [{"role": "user", "content": [
+                {"type": "input_audio", "input_audio": {"data": b64, "format": fmt}},
+                {"type": "text", "text": "перепиши аудио на русском дословно"},
+            ]}],
+        })
+        if result and result not in _FALLBACKS:
+            return result
+    except Exception as e:
+        log.warning("OR Whisper exc: %s", e)
+
+    return ""  # пустая строка = не смогла расшифровать
+
 
 
 async def ai_draw(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
@@ -722,6 +868,32 @@ async def ai_extract_fact(session: aiohttp.ClientSession, uid_str: str, text: st
     })
     if result and result.strip().upper() != "НЕТ" and len(result.strip()) < 150:
         mem.add_fact(uid_str, result.strip())
+
+
+async def ai_detect_trick(
+    session: aiohttp.ClientSession,
+    uid_str: str,
+    prev_bot_msg: str,
+    user_reply: str,
+) -> None:
+    """Определяет подкол в ответе пользователя и запоминает его."""
+    if len(user_reply) > 60 or len(prev_bot_msg) < 3:
+        return
+    result = await _or_post(session, {
+        "model": Secrets.MODEL_LLAMA, "max_tokens": 80,
+        "messages": [{"role": "user", "content":
+            f"Бот сказал: «{prev_bot_msg[:100]}»\n"
+            f"Пользователь ответил: «{user_reply[:60]}»\n"
+            f"Это подкол/троллинг/ловушка на бота? Если да — опиши подкол ОДНОЙ короткой фразой (до 40 символов). "
+            f"Если нет — ответь НЕТ."}],
+    })
+    if result and result.strip().upper() != "НЕТ" and len(result.strip()) < 80:
+        trick = result.strip()
+        mem.save_trick(uid_str, trick)
+        log.info("Подкол запомнен [%s]: %s", uid_str, trick)
+
+
+
 
 
 async def _applio_gradio_call(
@@ -874,6 +1046,36 @@ async def rvc_convert_audio(
     return None
 
 
+
+
+async def extract_frame_from_video(video_bytes: bytes, ext: str = "mp4") -> bytes | None:
+    """Извлекает первый кадр из mp4/gif через ffmpeg → jpeg байты."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        in_path  = os.path.join(tmpdir, f"input.{ext}")
+        out_path = os.path.join(tmpdir, "frame.jpg")
+        with open(in_path, "wb") as f:
+            f.write(video_bytes)
+        cmd = [
+            "ffmpeg", "-y", "-i", in_path,
+            "-vframes", "1",      # только первый кадр
+            "-q:v", "2",          # качество jpeg
+            "-vf", "scale=512:-1",  # уменьшаем до 512px ширины
+            out_path
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            await asyncio.wait_for(proc.wait(), timeout=15)
+            if os.path.exists(out_path):
+                with open(out_path, "rb") as f:
+                    return f.read()
+        except Exception as e:
+            log.warning("extract_frame fail: %s", e)
+    return None
 
 
 async def analyze_sticker_img(session, img_b64: str, mt: str = "image/webp") -> dict:
@@ -1239,10 +1441,70 @@ async def cmd_music(msg: Message):
     u = uid(msg)
     _music_waiting.add(u)
     await msg.answer(random.choice([
-        "ну скидывай песню или пиши название 🎵",
-        "чо петь? кидай аудио или пиши название",
-        "название песни давай или скинь аудио"
+        "скидывай трек с полной песней — сама разделю на вокал и минус, спою своим голосом 🎵",
+        "кидай аудио файл с песней целиком. разберу сама 🎤",
+        "давай mp3/ogg с песней — всё сделаю сама"
     ]))
+
+
+async def separate_audio_demucs(audio_bytes: bytes) -> tuple[bytes | None, bytes | None]:
+    """Разделяет аудио на vocals + accompaniment через demucs (CPU).
+    Возвращает (vocals_bytes, accompaniment_bytes).
+    Устанавливает demucs при первом запуске если нет.
+    """
+    import tempfile, subprocess, shutil
+    # проверяем demucs
+    if not shutil.which("demucs"):
+        log.info("demucs не найден, устанавливаю...")
+        proc = await asyncio.create_subprocess_exec(
+            "pip", "install", "demucs", "--break-system-packages", "-q",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await proc.wait()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        in_path  = os.path.join(tmpdir, "input.mp3")
+        out_dir  = os.path.join(tmpdir, "out")
+        with open(in_path, "wb") as f:
+            f.write(audio_bytes)
+
+        # demucs htdemucs_ft — самая точная модель, но медленная
+        # используем htdemucs — быстрее на CPU (~5-10 мин)
+        cmd = [
+            "python3", "-m", "demucs",
+            "--two-stems", "vocals",   # только vocals + no_vocals
+            "-n", "htdemucs",
+            "--out", out_dir,
+            in_path
+        ]
+        log.info("demucs запущен...")
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=900)
+        if proc.returncode != 0:
+            log.error("demucs failed: %s", stderr.decode()[-500:])
+            return None, None
+
+        # Ищем выходные файлы
+        vocals_path = None
+        backing_path = None
+        for root, _, files in os.walk(out_dir):
+            for fname in files:
+                full = os.path.join(root, fname)
+                if "vocals" in fname.lower() and "no_vocals" not in fname.lower():
+                    vocals_path = full
+                elif "no_vocals" in fname.lower() or "accompaniment" in fname.lower():
+                    backing_path = full
+
+        vocals_bytes  = open(vocals_path, "rb").read()  if vocals_path  else None
+        backing_bytes = open(backing_path, "rb").read() if backing_path else None
+        log.info("demucs OK: vocals=%s backing=%s",
+                 len(vocals_bytes) if vocals_bytes else 0,
+                 len(backing_bytes) if backing_bytes else 0)
+        return vocals_bytes, backing_bytes
 
 
 async def music_pipeline(
@@ -1253,54 +1515,48 @@ async def music_pipeline(
     audio_bytes: bytes | None = None,
 ) -> None:
     """Полный пайплайн /music:
-    1. Ищем вокал (acapella) через yt-dlp или принимаем аудио
-    2. Конвертируем вокал через RVC (голос мурки)
-    3. Ищем инструментал (минус)
-    4. Миксуем через ffmpeg
-    5. Отправляем результат
-    Всё это CPU-side, тяжело — статус обновляем каждый шаг.
+    1. Принимаем аудио от пользователя (полный трек с музыкой)
+    2. Разделяем на vocals + accompaniment через demucs (CPU, ~5-15 мин)
+    3. Конвертируем вокал через RVC — голос мурки
+    4. Миксуем новый вокал + оригинальный инструментал
+    5. Отправляем пользователю
     """
-    status = await msg.answer("🎵 ищу песню...")
+    if not audio_bytes:
+        await msg.answer(random.choice([
+            "скинь аудио файл с песней — разберусь сама",
+            "кидай трек целиком, я сама разделю",
+            "давай аудио с песней"
+        ]))
+        _music_waiting.add(u)
+        return
+
+    status = await msg.answer("🎵 получила трек, разделяю на вокал и минус... это займёт несколько минут")
     try:
-        vocals_bytes  = None
-        backing_bytes = None
+        # Шаг 1 — разделение
+        await status.edit_text("🎧 разделяю вокал и инструментал... (~5-15 мин, не уходи)")
+        vocals_bytes, backing_bytes = await separate_audio_demucs(audio_bytes)
 
-        if audio_bytes:
-            # Пользователь скинул аудио — используем как вокал напрямую
-            vocals_bytes = audio_bytes
-            await status.edit_text("🎙 конвертирую голос через RVC...")
-        else:
-            # Ищем acapella через OR
-            await status.edit_text(f"🔍 ищу акапеллу «{song_query}»...")
-            acapella_url = await find_acapella_url(session, song_query)
-            if acapella_url:
-                async with session.get(acapella_url, timeout=aiohttp.ClientTimeout(total=60)) as r:
-                    if r.status == 200:
-                        vocals_bytes = await r.read()
-            if not vocals_bytes:
-                await status.edit_text(
-                    f"не нашла акапеллу для «{song_query}», попробуй скинуть аудио сам"
-                )
-                return
-
-        # Конвертируем вокал через RVC
-        await status.edit_text("🎙 пою своим голосом... (это долго, подожди)")
-        rvc_vocals = await rvc_convert_audio(session, vocals_bytes, pitch=0)
-        if not rvc_vocals:
-            await status.edit_text("что-то пошло не так с RVC, попробуй позже")
+        if not vocals_bytes:
+            await status.edit_text(random.choice([
+                "не смогла разделить трек, попробуй другой формат",
+                "demucs сломался, попробуй позже",
+                "чото не вышло с разделением"
+            ]))
             return
 
-        if song_query:
-            # Ищем инструментал
-            await status.edit_text("🎸 ищу инструментал...")
-            backing_url = await find_instrumental_url(session, song_query)
-            if backing_url:
-                async with session.get(backing_url, timeout=aiohttp.ClientTimeout(total=60)) as r:
-                    if r.status == 200:
-                        backing_bytes = await r.read()
+        # Шаг 2 — RVC конвертация вокала
+        await status.edit_text("🎙 пою своим голосом... ещё немного подожди")
+        rvc_vocals = await rvc_convert_audio(session, vocals_bytes, pitch=0)
+        if not rvc_vocals:
+            await status.edit_text(random.choice([
+                "RVC не ответил, попробуй позже",
+                "что-то с голосовым сервером, попробуй через 5 мин",
+                "hf space упал попробуй позже"
+            ]))
+            return
 
+        # Шаг 3 — микс нового вокала с оригинальным инструменталом
         if backing_bytes:
-            # Миксуем вокал + инструментал через ffmpeg
             await status.edit_text("🎚 миксую трек...")
             final_audio = await mix_audio_ffmpeg(rvc_vocals, backing_bytes)
         else:
@@ -1308,72 +1564,52 @@ async def music_pipeline(
 
         await status.delete()
         await msg.answer_audio(
-            BufferedInputFile(final_audio, "murka_song.mp3"),
+            BufferedInputFile(final_audio, "murka_cover.mp3"),
             caption=random.choice([
-                "на жри 🎵",
-                "ну слушай",
-                "вот твоя песня в моём исполнении",
-                "надеюсь норм получилось"
+                "на жри 🎵 моё исполнение",
+                "ну слушай как я пою",
+                "вот держи с моим голосом",
+                "надеюсь норм вышло",
+                "мой голос мой выбор 🎤"
             ])
         )
-    except Exception as e:
+    except asyncio.TimeoutError:
+        await status.edit_text("слишком долго, demucs завис. попробуй трек покороче")
+    except Exception:
         log.exception("music_pipeline")
-        await status.edit_text("что-то сломалось с музыкой, попробуй позже")
-
-
-async def find_acapella_url(session: aiohttp.ClientSession, query: str) -> str | None:
-    """Ищем acapella/vocal track через OR."""
-    result = await _or_post(session, {
-        "model": Secrets.MODEL_LLAMA, "max_tokens": 200,
-        "messages": [{"role": "user", "content":
-            f"Найди прямую ссылку на скачивание acapella (только вокал без музыки) для песни: {query}. "
-            f"Проверенные источники: vocalremover.org, acapellas4u.co.uk, archive.org. "
-            f"Ответь ТОЛЬКО прямой ссылкой на mp3/wav файл, без объяснений. Если не знаешь — ответь НЕТ."}],
-    })
-    if result and result.strip().upper() != "НЕТ" and result.startswith("http"):
-        return result.strip()
-    return None
-
-
-async def find_instrumental_url(session: aiohttp.ClientSession, query: str) -> str | None:
-    """Ищем instrumental/minus track через OR."""
-    result = await _or_post(session, {
-        "model": Secrets.MODEL_LLAMA, "max_tokens": 200,
-        "messages": [{"role": "user", "content":
-            f"Найди прямую ссылку на скачивание instrumental/karaoke версии песни: {query}. "
-            f"Источники: karaoke-lyrics.net, sing2music.com, archive.org. "
-            f"Ответь ТОЛЬКО прямой ссылкой на mp3/wav файл, без объяснений. Если не знаешь — ответь НЕТ."}],
-    })
-    if result and result.strip().upper() != "НЕТ" and result.startswith("http"):
-        return result.strip()
-    return None
+        await status.edit_text("что-то сломалось, попробуй позже")
 
 
 async def mix_audio_ffmpeg(vocals: bytes, backing: bytes) -> bytes:
     """Миксует вокал и инструментал через ffmpeg subprocess."""
-    import tempfile, subprocess
+    import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
         voc_path = os.path.join(tmpdir, "vocals.wav")
-        bck_path = os.path.join(tmpdir, "backing.mp3")
+        bck_path = os.path.join(tmpdir, "backing.wav")
         out_path = os.path.join(tmpdir, "mixed.mp3")
         with open(voc_path, "wb") as f: f.write(vocals)
         with open(bck_path, "wb") as f: f.write(backing)
         cmd = [
             "ffmpeg", "-y",
-            "-i", voc_path,
-            "-i", bck_path,
-            "-filter_complex", "[0:a]volume=1.5[v];[1:a]volume=1.0[b];[v][b]amix=inputs=2:duration=longest",
+            "-i", voc_path, "-i", bck_path,
+            "-filter_complex",
+            "[0:a]volume=1.4[v];[1:a]volume=0.9[b];[v][b]amix=inputs=2:duration=longest",
             "-c:a", "libmp3lame", "-q:a", "2",
             out_path
         ]
         proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
         )
-        await proc.wait()
+        await asyncio.wait_for(proc.wait(), timeout=120)
         if os.path.exists(out_path):
             with open(out_path, "rb") as f:
                 return f.read()
-    return vocals  # fallback — просто вокал без инструментала
+    return vocals  # fallback
+
+
+
 
 
 @dp.message(F.voice | F.audio)
@@ -1393,6 +1629,17 @@ async def on_audio(msg: Message, aiohttp_session: aiohttp.ClientSession):
     try:
         raw   = await dl(obj.file_id)
         text  = await ai_transcribe(aiohttp_session, raw, fname)
+
+        if not text or text in _FALLBACKS:
+            # транскрипция не удалась — реагируем на само аудио без текста
+            await status.edit_text("не расслышала чёт, отвечаю как слышу")
+            answer = await ai_chat(aiohttp_session, u,
+                "тебе скинули голосовое сообщение, но ты не расслышала что там. "
+                "отреагируй коротко в своём стиле.")
+            await status.delete()
+            await send_smart(msg, answer)
+            return
+
         await status.edit_text(f"🎙 «{text}»\n\nотвечаю...")
         _auto_gender(u, text)
         mem.reset_sticker_streak(u)
@@ -1404,7 +1651,8 @@ async def on_audio(msg: Message, aiohttp_session: aiohttp.ClientSession):
         await maybe_force_sticker(msg, u)
     except Exception as e:
         log.exception("on_audio")
-        await status.edit_text(_fallback())
+        try: await status.edit_text(_fallback())
+        except Exception: pass
 
 
 
@@ -1514,21 +1762,24 @@ async def on_gif(msg: Message, aiohttp_session: aiohttp.ClientSession):
     streak    = mem.inc_sticker_streak(u)
     img_b64   = None
 
-    # пробуем thumbnail, потом миниатюру через file_id напрямую
+    # Telegram отдаёт гифки как mp4 — thumbnail тоже бывает недоступен
+    # Пробуем: 1) thumbnail 2) извлечь кадр ffmpeg из самого файла
     if animation.thumbnail:
         try:
             raw     = await dl(animation.thumbnail.file_id)
             img_b64 = base64.b64encode(raw).decode()
         except Exception:
             pass
-    if not img_b64 and animation.file_id:
-        # fallback: первые байты самого файла как jpeg (Telegram иногда отдаёт)
+
+    if not img_b64:
         try:
             raw = await dl(animation.file_id)
-            if raw[:3] in (b'\xff\xd8\xff', b'GIF', b'\x89PN'):
-                img_b64 = base64.b64encode(raw[:500000]).decode()
-        except Exception:
-            pass
+            # Telegram гифки — это mp4. Извлекаем первый кадр через ffmpeg
+            frame = await extract_frame_from_video(raw, "mp4")
+            if frame:
+                img_b64 = base64.b64encode(frame).decode()
+        except Exception as e:
+            log.warning("gif frame extract fail: %s", e)
 
     if img_b64:
         info = await analyze_sticker_img(aiohttp_session, img_b64, "image/jpeg")
@@ -1551,8 +1802,8 @@ async def on_gif(msg: Message, aiohttp_session: aiohttp.ClientSession):
         prompt = (
             f"тебе скинули гифку. на ней: {info['description']}. "
             f"настроение: {info['emotion']}. "
-            + (f"подпись: {caption}. " if caption else "") +
-            f"отреагируй как обычно пишешь в тг. "
+            + (f"подпись: {caption}. " if caption else "")
+            + "отреагируй как обычно пишешь в тг. "
             f"если хочешь кинуть гифку — [ГИФКА: теги]"
         )
     else:
@@ -1567,17 +1818,17 @@ async def on_gif(msg: Message, aiohttp_session: aiohttp.ClientSession):
                 except Exception: pass
                 return
         prompt = (
-            f"тебе скинули гифку"
-            + (f" с подписью '{caption}'" if caption else "") +
-            f". отреагируй в своём стиле."
+            "тебе скинули гифку"
+            + (f" с подписью '{caption}'" if caption else "")
+            + ". отреагируй в своём стиле."
         )
     try:
         answer = await ai_chat(aiohttp_session, u, prompt)
         answer = await maybe_send_sticker(msg, answer)
         await send_smart(msg, answer)
-    except Exception as e:
+    except Exception:
         log.exception("on_gif")
-        await msg.answer("я хуею с этой гифки")
+        await msg.answer(random.choice(["ну и гифка", "чо за движуха", "😎"]))
 
 
 @dp.message(F.video | F.video_note)
@@ -1642,20 +1893,31 @@ async def on_video(msg: Message, aiohttp_session: aiohttp.ClientSession):
 
 
 # ── поиск картинок через inline-бота @pic ──────────────────────────────────
-async def search_and_send_pic(msg: Message, query: str):
-    """Ищет картинку через инлайн-бота @pic и пересылает результат."""
+async def search_and_send_pic(msg: Message, query: str) -> bool:
+    """Ищет картинку через Pollinations image endpoint и отправляет.
+    get_inline_bot_results требует inline mode — используем генерацию через pollinations
+    как "поиск" (быстро, бесплатно).
+    """
+    from urllib.parse import quote
     try:
-        results = await bot.get_inline_bot_results("pic", query)
-        if results.results:
-            pick = random.choice(results.results[:5])
-            await bot.send_inline_query_result(
-                chat_id=msg.chat.id,
-                query_id=results.query_id,
-                result_id=pick.id,
-            )
-            return True
+        encoded = quote(query)
+        seed    = random.randint(1, 999999)
+        # используем модели которые дают реалистичные фото, не арт
+        url = f"https://image.pollinations.ai/prompt/{encoded}?width=800&height=800&nologo=true&nofeed=true&model=flux&seed={seed}"
+        async with msg._bot.session.get(   # type: ignore
+            url,
+            timeout=aiohttp.ClientTimeout(total=60),
+            headers={"User-Agent": "Mozilla/5.0"},
+            allow_redirects=True,
+        ) as r:
+            if r.status == 200:
+                ct   = r.headers.get("content-type", "")
+                data = await r.read()
+                if len(data) > 5000 and "image" in ct:
+                    await msg.answer_photo(BufferedInputFile(data, "pic.jpg"))
+                    return True
     except Exception as e:
-        log.warning("pic search fail: %s", e)
+        log.warning("search_and_send_pic fail: %s", e)
     return False
 
 
@@ -1704,11 +1966,16 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
                 await msg.answer(random.choice(["чото не вышло с голосом", "сломалось нахуй", "hf space отдыхает попробуй позже"]))
             return
 
-        # /music — ждём название песни текстом
+        # /music — ждём аудиофайл, текст не принимаем
         if u in _music_waiting:
             _music_waiting.discard(u)
             stop.set()
-            await music_pipeline(aiohttp_session, msg, u, song_query=text)
+            await msg.answer(random.choice([
+                "мне нужно аудио, текст не подойдёт — скинь файл с песней",
+                "кидай аудио файл, не текст",
+                "нужен аудио трек, а не название"
+            ]))
+            _music_waiting.add(u)  # снова ждём
             return
 
         # обработка запроса на картинку (не нарисовать, а найти)
@@ -1725,13 +1992,20 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
             if sent:
                 await send_smart(msg, random.choice(["на", "держи", "вот", "нашла"]))
                 return
-            # если pic не нашёл — просто отвечаем текстом
+            # pic не нашёл — отвечаем текстом как обычно
 
         answer = await ai_chat(aiohttp_session, u, text)
         stop.set()
         answer = await maybe_send_sticker(msg, answer)
         await send_smart(msg, answer)
+        # фоновые задачи: факты + детект подколов
         asyncio.create_task(ai_extract_fact(aiohttp_session, u, text))
+        # детектим подкол — смотрим последний ответ бота в истории
+        history = mem.get_history(u)
+        last_bot = next((m["content"] for m in reversed(history)
+                         if m["role"] == "assistant"), "")
+        if last_bot and len(text) < 50:
+            asyncio.create_task(ai_detect_trick(aiohttp_session, u, last_bot, text))
         await maybe_force_sticker(msg, u)
     except Exception as e:
         stop.set()
