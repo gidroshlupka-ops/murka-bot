@@ -70,7 +70,7 @@ class KeyManager:
     # вызов (все ключи "тёплые"), получал "" и падал на фолбек.
     MIN_INTERVAL = 6   # секунд — используется только для логирования
 
-    _BAN_DB = "gemini_bans.db"  # SQLite файл для персистентных банов
+    _BAN_DB = "/data/gemini_bans.db" if os.path.isdir("/data") else "gemini_bans.db"
 
     def __init__(self, pool: list[str]):
         self._pool      = [k for k in pool if k and len(k) > 20]
@@ -778,7 +778,7 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
     # Если ключ вернул 200 — выходим сразу. Если 429 — баним и берём следующий.
     # Если не-429 ошибка — логируем полный текст и пробуем ещё раз тот же ключ
     # (возможно временный сбой). После 2 неуспешных попыток — ротируем.
-    max_key_switches = min(len(_keys), 5)  # переключаем ключ не более 5 раз
+    max_key_switches = len(_keys._pool)  # проверяем все ключи по одному разу
     switched = 0
     local_attempt = 0  # попыток с текущим ключом
 
@@ -803,6 +803,12 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
             if idx == -1 or not key:
                 log.warning("Все Gemini ключи на кулдауне, сдаюсь")
                 return _fallback()
+
+        # Пропускаем забаненные ключи без HTTP запроса
+        if _keys._is_banned(idx):
+            _keys._idx = (idx + 1) % len(_keys._pool)
+            switched += 1
+            continue
 
         try:
             async with session.post(
