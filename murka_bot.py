@@ -128,7 +128,9 @@ class KeyManager:
 _keys = KeyManager(Secrets.GEMINI_POOL)
 # Семафор — не более 3 параллельных запросов к Gemini
 # Без него при старте 10+ сообщений прилетают одновременно и сжигают все ключи
-_gemini_sem = asyncio.Semaphore(3)
+_gemini_sem: asyncio.Semaphore | None = None  # инициализируется лениво
+_gemini_last_request: float = 0.0             # время последнего запроса
+_gemini_lock = None                           # asyncio.Lock, инициализируется лениво
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -648,7 +650,21 @@ def _to_gemini(messages: list) -> tuple:
 
 async def _gemini_post(session: aiohttp.ClientSession,
                        messages: list, model: str) -> str:
-    async with _gemini_sem:  # не более 3 параллельных запросов
+    global _gemini_sem, _gemini_lock, _gemini_last_request
+    # ленивая инициализация asyncio примитивов (нужен живой event loop)
+    if _gemini_lock is None:
+        _gemini_lock = asyncio.Lock()
+    if _gemini_sem is None:
+        _gemini_sem = asyncio.Semaphore(2)
+
+    async with _gemini_sem:
+        # глобальный rate limit: не чаще 1 запроса в секунду суммарно
+        async with _gemini_lock:
+            now  = time.monotonic()
+            wait = 1.0 - (now - _gemini_last_request)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            _gemini_last_request = time.monotonic()
         return await _gemini_post_inner(session, messages, model)
 
 
