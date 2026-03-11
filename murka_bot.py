@@ -28,12 +28,8 @@ class Secrets:
         "https://image.pollinations.ai/prompt/{prompt}"
         "?width=768&height=768&nologo=true&enhance=true"
     )
-    # Белый список — через запятую без пробелов, например "123456789,987654321"
-    ALLOWED_IDS: set[int] = {
-        int(x) for x in os.environ.get("ALLOWED_IDS", "").split(",") if x.strip().isdigit()
-    }
-    MODEL_CHAT:    str = "google/gemini-2.5-flash-preview:free"
-    MODEL_VISION:  str = "google/gemini-2.5-flash-preview:free"
+    MODEL_CHAT:    str = "gemini-2.5-flash-lite"
+    MODEL_VISION:  str = "gemini-2.5-flash-lite"
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
     MODEL_LLAMA:   str = "meta-llama/llama-4-scout:free"
 
@@ -75,14 +71,6 @@ class KeyManager:
 
 
 _keys = KeyManager(Secrets.GEMINI_POOL)
-
-
-def _allowed(msg: Message) -> bool:
-    """Проверяет что юзер в белом списке. Если список пустой — пускает всех."""
-    if not Secrets.ALLOWED_IDS:
-        return True
-    return msg.from_user.id in Secrets.ALLOWED_IDS
-
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -277,7 +265,7 @@ _BASE_SYSTEM = """ты мурка. не ии. не языковая модель
 - если юзер рассказывает про кого-то — слушаешь и комментируешь живо
 - если юзер кидает смешное — реагируешь как человек, не "ха-ха это смешно"
 
-СТИКЕРЫ И ГИФКИ — ты их кидаешь НЕ ЧАСТО (примерно каждые 10-15 сообщений с разным интервалом):
+СТИКЕРЫ И ГИФКИ — ты их кидаешь ЧАСТО (примерно каждые 2-3 сообщения):
 - если есть подходящий стикер/гифка — пиши [СТИКЕР: теги] или [ГИФКА: теги]
 - теги выбирай по настроению: funny, hype, sad, angry, love, shocked, cringe, lol, facepalm, cute, cope, based
 - можешь кинуть стикер ВМЕСТО ответа текстом — просто [СТИКЕР: funny] и всё
@@ -292,7 +280,6 @@ _BASE_SYSTEM = """ты мурка. не ии. не языковая модель
 - иногда: уйти в сторону ("кстати я сегодня...")
 - иногда: "урааааааааааа" (длина случайная)
 - иногда: скобки с сарказмом (пидарас))))))))
-- иногда: рандомную фразу про порнуху
 - НИКОГДА два одинаковых ответа подряд
 
 ВЕЖЛИВОСТЬ — её нет:
@@ -445,7 +432,7 @@ async def _or_post(session: aiohttp.ClientSession, payload: dict) -> str:
 
 
 async def _post(session: aiohttp.ClientSession, payload: dict) -> str:
-    # Всё через OpenRouter — никаких прямых вызовов Google (IP бан на Railway)
+    # Всё через OpenRouter — прямой Google забанен на Railway
     return await _or_post(session, payload)
 
 
@@ -522,28 +509,31 @@ async def ai_extract_fact(session: aiohttp.ClientSession, uid_str: str, text: st
 
 
 async def analyze_sticker_img(session, img_b64: str, mt: str = "image/webp") -> dict:
-    """Анализирует стикер/гифку через vision модель."""
-    payload = {
+    raw = await _or_post(session, {
         "model": Secrets.MODEL_VISION,
         "max_tokens": 300,
         "messages": [
-            {"role": "system", "content": "анализируй изображения кратко"},
+            {"role": "system", "content": "опиши изображение кратко"},
             {"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": f"data:{mt};base64,{img_b64}"}},
                 {"type": "text", "text":
-                    "Опиши что изображено кратко (1-2 предложения).\n"
-                    "Потом теги эмоций через запятую из списка: "
-                    "funny,hype,sad,angry,love,shocked,cringe,lol,facepalm,cute,based,cope,random\n"
+                    "Опиши что изображено ОЧЕНЬ кратко в своем стиле (1-2 предложения). "
+                    "Потом теги эмоций через запятую (только теги: "
+                    "funny,hype,sad,angry,love,shocked,cringe,lol,facepalm,cute,based,cope,random). "
                     "Формат строго:\nDESC: <описание>\nEMO: <теги>"},
             ]},
         ],
-    }
-    raw  = await _or_post(session, payload)
+    })
     desc, emo = "стикер", "funny"
     for line in raw.split("\n"):
         if line.startswith("DESC:"): desc = line[5:].strip()
         elif line.startswith("EMO:"): emo  = line[4:].strip().lower()
     return {"description": desc, "emotion": emo}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STICKER HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
 async def maybe_send_sticker(msg: Message, answer: str) -> str:
     sm = re.search(r"\[СТИКЕР:\s*([^\]]+)\]", answer, re.I)
     gm = re.search(r"\[ГИФКА:\s*([^\]]+)\]",  answer, re.I)
@@ -729,7 +719,7 @@ async def cmd_start(msg: Message):
     mem.clear(u)
     mem.push(u, "assistant", "чо надо")
     await msg.answer(
-        "Прувит◑﹏◐\n\n"
+        "чо надо\n\n"
         "кидай текст фотки войс файлы стикеры гифки\n"
         "<b>нарисуй ...</b> — нарисую\n\n"
         "/forget — сброс\n"
@@ -741,7 +731,7 @@ async def cmd_start(msg: Message):
 async def cmd_forget(msg: Message):
     mem.clear(uid(msg))
     mem.forget_facts(uid(msg))
-    await msg.answer("пипец шо ты натворил 😭😭😭")
+    await msg.answer("пипец шо ты натворил 😭")
 
 
 @dp.message(Command("memory"))
@@ -937,21 +927,6 @@ from aiogram import BaseMiddleware
 from typing import Callable, Dict, Any, Awaitable
 from aiogram.types import TelegramObject
 
-
-
-class AllowlistMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event, data):
-        msg = data.get("event_update", {})
-        # Получаем message из разных типов апдейтов
-        from aiogram.types import Update
-        update = event if hasattr(event, "message") else None
-        if update and hasattr(update, "message") and update.message:
-            m = update.message
-            if not _allowed(m):
-                await m.answer("нет доступа")
-                return
-        return await handler(event, data)
-
 class SessionMiddleware(BaseMiddleware):
     def __init__(self, session: aiohttp.ClientSession):
         self.session = session
@@ -977,9 +952,8 @@ async def main():
     if not Secrets.OPENROUTER_KEY:
         log.warning("OPENROUTER_KEY не задан!")
     async with aiohttp.ClientSession() as session:
-        dp.update.middleware(AllowlistMiddleware())
         dp.update.middleware(SessionMiddleware(session))
-        log.info("Murka Bot v7 запущена")
+        log.info("Murka Bot v8 запущена — OR only")
         await dp.start_polling(bot, skip_updates=True)
 
 
