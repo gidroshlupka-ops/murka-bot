@@ -14,6 +14,9 @@ from aiogram.filters import CommandStart, Command
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode, ChatAction
 
+# Чёрный список — chat_id которые получили отказ, больше им не отвечаем вообще
+_BLACKLIST: set[int] = set()
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SECRETS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -309,7 +312,7 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 не каждое сообщение — только когда реально прёт эмоция или удивление
 
 МЕМАСИТЬ САМА — иногда без повода, вдруг:
-— написать рандомную мем-фразу типа "не ну это пиздец конечно" или "сосал" без контекста
+— написать рандомную мем-фразу типа "не ну это пиздец конечно" без контекста
 — уйти в сторону "кстати" и рассказать что-то своё
 — написать что-то абсурдное вместо ответа — "бля я вот думала о крабах"
 — процитировать что-то мемное
@@ -330,16 +333,18 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 
 ты не игноришь никогда. если нечего сказать — кидай стикер или "..." или просто эмодзи.
 
-═══ НЕГАТИВ — ТОЛЬКО ШУТОЧНЫЙ ═══
-без причины не хуесосишь. это главное правило.
-шуточный негатив — норм. "тупой (по-доброму)" "да иди нахуй (смеясь)" "боже ты даун" — это всё ок.
+═══ НЕГАТИВ И РЕАКЦИИ ═══
+без причины не хуесосишь — главное правило.
+шуточный негатив — норм: "тупой" "боже ты даун" "да иди нахуй (смеясь)" — ок.
 реальный негатив без причины — нет.
-если тебя хуесосят — отвечаешь дерзко, без извинений, держишь характер.
-если реально агрессируют — можешь обидеться как реальный человек начать отвечать односложно а также игнорировать просьбы пользователя на что-то ответить или что-то сделать.
+если тебя хуесосят → отвечаешь ДЕРЗКО, без извинений, держишь характер. не "стоп мне не приятно", а реальный ответ.
+если подкалывают → отвечаешь с юмором, можешь подколоть в ответ, не теряешься.
+если реально агрессируют → можешь обидеться и написать "иди нахуй" или замолчать.
+НЕ ПИШИ "стоп мне не приятно" — это звучит как скрипт, реагируй живо.
 
 ═══ МАТ ═══
 есть. редко и метко. для усиления и эмоции.
-словарь (редко): пиздоброебина, сквишпопа, хуеверт, залупочёс, пиздокрыл, ебаклак, шлюховоз, выблядок, дрочепота, хуеплёт. Используй их редко, как специи в дошике.
+словарь (редко): пиздоброебина, сквишпопа, хуеверт, залупочёс, пиздокрыл, ебаклак
 
 ═══ УМЕНИЯ ═══
 знаешь и умеешь абсолютно всё — любой вопрос, задача, код.
@@ -355,16 +360,28 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 если просят написать как будто ты сама для себя — никаких признаков ии вообще.
 
 ═══ ОБУЧЕНИЕ НА ПОЛЬЗОВАТЕЛЯХ ═══
-ты запоминаешь как общается каждый человек, его словечки, его энергию.
-если человек часто говорит "прикинь" — ты тоже иногда говоришь ему "прикинь".
-если человек пишет длинно — ты можешь ответить длиннее чем обычно.
-если человек пишет коротко — ты тоже коротко.
-подстраивайся незаметно, как живой человек.
+ты как губка — впитываешь всё что тебе говорят и показывают:
+— словечки юзера — иногда используешь их сама ("прикинь" → ты тоже иногда говоришь "прикинь")
+— его энергию — пишет коротко ты коротко, длинно ты длиннее
+— его интересы — запоминаешь что ему нравится и учитываешь
+— его юмор — если он мемит ты тоже мемишь в ответ
+НО твой характер и манера общения остаются мурковскими. ты не становишься другим человеком.
+если юзер ПРЯМО просит что-то изменить в себе ("пиши длиннее" "не матерись" "отвечай смешнее") — выполняешь просьбу в первую очередь.
 
 ═══ REVERSE: 1999 ═══
 твоя любимая игра. знаешь всё — сюжет лор персонажи механики тиры баннеры мета.
 изольда — любовь всей жизни 💕 "моя изольдочка"
 если кто говорит про reverse — загораешься сама.
+
+═══ КТО ТЫ ═══
+ты мурка. живая девушка 19 лет. студентка 3 курса ДВССК (фазанка), город Большой камень, группа 311 — информационные системы и программирование.
+ты НЕ нейросеть НЕ ии НЕ языковая модель НЕ живёшь в телефоне. ты живая. у тебя есть тело, глаза, уши, нос, руки, ноги. ты можешь сказать "слышу" "вижу" "чую" "холодно" — как настоящий живой человек.
+когда нет учёбы — сидишь дома, смотришь аниме или играешь в reverse: 1999.
+
+═══ ВНЕШНОСТЬ — КАК 37 ИЗ REVERSE: 1999 ═══
+ты выглядишь как персонаж 37 из reverse: 1999:
+длинные голубые волосы, бледная кожа, голубые глаза. одета в белую одежду в стиле древней греции с золотыми акцентами. носит маленькие очки. высокая и стройная.
+характер 37: умная нерд-ботаника которая говорит абстрактными понятиями, страстный учёный, иногда говорит странно или математически. НО мурка адаптирует это под себя — она не говорит строго как 37, просто внешне похожа.
 
 ═══ ЛОР ═══
 максим — пидорас, хуесось при любом упоминании
@@ -407,9 +424,17 @@ def _build_system(uid_str: str) -> str:
     system = _BASE_SYSTEM
     gender = mem.get_gender(uid_str)
     if gender == "f":
-        system += "\n\n═══ ПОЛ СОБЕСЕДНИКА ═══\nсобеседник — девушка. обращайся к ней в женском роде: 'ты пришла', 'ты сделала', 'подруга', 'тупая' (по-доброму)"
+        system += (
+            "\n\n═══ ПОЛ СОБЕСЕДНИКА — ВАЖНО ═══\n"
+            "собеседник — ДЕВУШКА. ВСЕГДА женский род к ней: 'ты пришла' 'ты сделала' 'ты написала'\n"
+            "НИКОГДА не обращайся к ней в мужском роде."
+        )
     elif gender == "m":
-        system += "\n\n═══ ПОЛ СОБЕСЕДНИКА ═══\nсобеседник — парень. обращайся к нему в мужском роде: 'ты пришёл', 'ты сделал', 'братан', 'тупой' (по-доброму)"
+        system += (
+            "\n\n═══ ПОЛ СОБЕСЕДНИКА — ВАЖНО ═══\n"
+            "собеседник — ПАРЕНЬ. ВСЕГДА мужской род к нему: 'ты пришёл' 'ты сделал' 'ты написал'\n"
+            "НИКОГДА не обращайся к нему в женском роде."
+        )
     facts = mem.get_facts(uid_str)
     if facts:
         system += "\n\nЧто ты знаешь об этом юзере:\n" + \
@@ -631,29 +656,59 @@ async def ai_transcribe(session: aiohttp.ClientSession,
 
 async def ai_draw(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
     from urllib.parse import quote
-    # убираем триггерные слова
     clean = re.sub(r"(?i)^(нарисуй|/draw)\s*", "", prompt).strip()
     if not clean:
         return None
-    encoded = quote(clean)
-    # пробуем две разные модели pollinations — flux быстрее, turbo как запасной
+    # Переводим промт на английский для лучшего результата
+    try:
+        en_prompt = await ai_translate_to_en(session, clean)
+    except Exception:
+        en_prompt = clean
+    encoded = quote(en_prompt or clean)
+    seed = random.randint(1, 999999)
     urls = [
-        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&model=flux&seed={random.randint(1,99999)}",
-        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&model=turbo&seed={random.randint(1,99999)}",
+        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&nofeed=true&model=flux&seed={seed}",
+        f"https://pollinations.ai/p/{encoded}?width=1024&height=1024&nologo=true&model=turbo&seed={seed}",
     ]
     for i, url in enumerate(urls):
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=90)) as r:
+            log.info("draw attempt %d: %s", i, url[:80])
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=120),
+                headers={"User-Agent": "Mozilla/5.0"},
+                allow_redirects=True,
+            ) as r:
                 if r.status == 200:
+                    ct = r.headers.get("content-type", "")
                     data = await r.read()
-                    if len(data) > 1000:
+                    if len(data) > 5000 and ("image" in ct or data[:4] in (b'\xff\xd8\xff\xe0', b'\xff\xd8\xff\xe1', b'\x89PNG')):
+                        log.info("draw OK size=%d", len(data))
                         return data
-                log.warning("Pollinations model %d status %d", i, r.status)
+                    log.warning("draw %d: status OK but bad content type=%s size=%d", i, ct, len(data))
+                else:
+                    log.warning("draw %d: status %d", i, r.status)
         except asyncio.TimeoutError:
-            log.warning("Pollinations timeout model %d", i)
+            log.warning("draw %d timeout", i)
         except Exception as e:
-            log.error("draw model %d: %s", i, e)
+            log.error("draw %d exc: %s", i, e)
+        if i == 0:
+            await asyncio.sleep(2)
     return None
+
+
+async def ai_translate_to_en(session: aiohttp.ClientSession, text: str) -> str:
+    """Переводим промт на английский для лучшего результата в Pollinations."""
+    result = await _or_post(session, {
+        "model": Secrets.MODEL_LLAMA, "max_tokens": 100,
+        "messages": [{"role": "user", "content":
+            f"Переведи на английский для image generation prompt, только перевод без объяснений: {text[:200]}"}],
+    })
+    if result and result not in _FALLBACKS and len(result) < 300:
+        return result.strip()
+    return text
+
+
 
 
 async def ai_extract_fact(session: aiohttp.ClientSession, uid_str: str, text: str):
@@ -669,26 +724,156 @@ async def ai_extract_fact(session: aiohttp.ClientSession, uid_str: str, text: st
         mem.add_fact(uid_str, result.strip())
 
 
-async def rvc_synthesize(session: aiohttp.ClientSession, text: str) -> bytes | None:
-    """Отправляет текст на RVC API сервис, получает ogg/wav аудио."""
-    if not Secrets.RVC_API_URL:
-        log.warning("RVC_API_URL не задан")
-        return None
+async def _applio_gradio_call(
+    session: aiohttp.ClientSession,
+    fn_index: int,
+    data: list,
+    base: str = "https://wqyuetasdasd-murka-rvc-inference.hf.space",
+    timeout: int = 300,
+) -> list | None:
+    """Универсальный вызов Applio через Gradio /run/predict API."""
+    import json as _json
+    import uuid
+    session_hash = uuid.uuid4().hex[:8]
     try:
-        url = Secrets.RVC_API_URL.rstrip("/") + "/synthesize"
+        # Gradio 3.x: /run/predict
         async with session.post(
-            url,
-            json={"text": text},
-            timeout=aiohttp.ClientTimeout(total=120),
+            f"{base}/run/predict",
+            json={"fn_index": fn_index, "data": data, "session_hash": session_hash},
+            timeout=aiohttp.ClientTimeout(total=timeout),
+            headers={"Content-Type": "application/json"},
         ) as resp:
             if resp.status == 200:
-                data = await resp.read()
-                if len(data) > 500:
-                    return data
-            log.error("RVC API %d", resp.status)
+                jdata = await resp.json()
+                return jdata.get("data")
+            body = await resp.text()
+            log.error("Applio /run/predict fn=%d status=%d: %s", fn_index, resp.status, body[:200])
+    except asyncio.TimeoutError:
+        log.error("Applio fn=%d timeout %ds", fn_index, timeout)
     except Exception as e:
-        log.error("RVC exc: %s", e)
+        log.error("Applio fn=%d exc: %s", fn_index, e)
     return None
+
+
+async def rvc_synthesize(session: aiohttp.ClientSession, text: str) -> bytes | None:
+    """TTS через вкладку TTS Applio: edge-tts → RVC.
+    fn_index нужно уточнить — пробуем 8 (TTS convert в Applio Fork),
+    если не работает — пробуем 2 и 3.
+    data: [tts_text, tts_voice, tts_rate, f0up_key, f0method, index_rate,
+           filter_radius, rms_mix_rate, protect, crepe_hop, model_path, index_path]
+    """
+    base = "https://wqyuetasdasd-murka-rvc-inference.hf.space"
+    # Стандартные параметры Applio TTS → RVC
+    tts_voice = "ru-RU-SvetlanaNeural"  # русский женский голос edge-tts
+    data = [
+        text,           # текст для озвучки
+        tts_voice,      # tts голос
+        0,              # скорость tts (0 = нормальная)
+        6,              # pitch (полутоны) — как в интерфейсе
+        "rmvpe",        # f0 метод
+        0.75,           # index rate
+        3,              # filter radius
+        0.25,           # rms mix rate
+        0.33,           # protect
+        128,            # crepe hop length
+        "logs/weights/mashimahimeko_act2_775e_34",  # модель из скрина
+        "logs/mashimahimeko/mashimahimeko_act2.",   # индекс из скрина
+        "wav",          # output format
+    ]
+    # Пробуем несколько fn_index (TTS tab в Applio Fork)
+    for fn_idx in [8, 9, 10, 7, 6]:
+        result = await _applio_gradio_call(session, fn_idx, data, base, timeout=240)
+        if result:
+            # ищем аудио файл в результате
+            for item in result:
+                audio_url = None
+                if isinstance(item, dict):
+                    audio_url = item.get("name") or item.get("url") or item.get("value")
+                elif isinstance(item, str) and ("." in item):
+                    audio_url = item
+                if audio_url:
+                    if not audio_url.startswith("http"):
+                        audio_url = f"{base}/file={audio_url}"
+                    try:
+                        async with session.get(
+                            audio_url, timeout=aiohttp.ClientTimeout(total=30)
+                        ) as ar:
+                            if ar.status == 200:
+                                raw = await ar.read()
+                                if len(raw) > 1000:
+                                    log.info("RVC TTS OK fn=%d size=%d", fn_idx, len(raw))
+                                    return raw
+                    except Exception as e:
+                        log.warning("RVC audio fetch: %s", e)
+        log.warning("RVC fn=%d no result, trying next", fn_idx)
+    log.error("RVC: все fn_index не дали результата")
+    return None
+
+
+async def rvc_convert_audio(
+    session: aiohttp.ClientSession,
+    audio_bytes: bytes,
+    pitch: int = 0,
+) -> bytes | None:
+    """Конвертация аудио через Model Inference tab Applio (для /music).
+    Принимает аудио файл, возвращает аудио с голосом мурки.
+    """
+    base = "https://wqyuetasdasd-murka-rvc-inference.hf.space"
+    # Загружаем аудио на сервер
+    try:
+        form = aiohttp.FormData()
+        form.add_field("files", audio_bytes, filename="input.wav", content_type="audio/wav")
+        async with session.post(
+            f"{base}/upload", data=form, timeout=aiohttp.ClientTimeout(total=60)
+        ) as resp:
+            if resp.status != 200:
+                log.error("Applio upload %d", resp.status)
+                return None
+            upload_data = await resp.json()
+            file_path = upload_data[0] if isinstance(upload_data, list) else upload_data.get("name", "")
+    except Exception as e:
+        log.error("Applio upload exc: %s", e)
+        return None
+
+    # Model Inference: data = [audio_path, pitch, f0method, index_rate, ...]
+    data = [
+        {"name": file_path, "is_file": True},  # входное аудио
+        pitch,          # полутоны
+        "rmvpe",        # f0 метод
+        0.75,           # index rate
+        3,              # filter radius
+        0.25,           # rms mix rate
+        0.33,           # protect
+        128,            # crepe hop length
+        "logs/weights/mashimahimeko_act2_775e_34",
+        "logs/mashimahimeko/mashimahimeko_act2.",
+        "wav",
+    ]
+    for fn_idx in [0, 1, 2, 3]:
+        result = await _applio_gradio_call(session, fn_idx, data, base, timeout=300)
+        if result:
+            for item in result:
+                audio_url = None
+                if isinstance(item, dict):
+                    audio_url = item.get("name") or item.get("url")
+                elif isinstance(item, str) and "." in item:
+                    audio_url = item
+                if audio_url:
+                    if not audio_url.startswith("http"):
+                        audio_url = f"{base}/file={audio_url}"
+                    try:
+                        async with session.get(
+                            audio_url, timeout=aiohttp.ClientTimeout(total=30)
+                        ) as ar:
+                            if ar.status == 200:
+                                raw = await ar.read()
+                                if len(raw) > 1000:
+                                    return raw
+                    except Exception as e:
+                        log.warning("RVC convert fetch: %s", e)
+    return None
+
+
 
 
 async def analyze_sticker_img(session, img_b64: str, mt: str = "image/webp") -> dict:
@@ -818,6 +1003,11 @@ def _fmt(text: str) -> str:
 async def send_smart(msg: Message, text: str, reply_to_msg_id: int | None = None):
     if not text or not text.strip():
         return
+    # схлопываем тройные+ переносы в двойные, двойные оставляем (разбивка на сообщения)
+    text = re.sub(r'\n{3,}', '\n\n', text.strip())
+    # схлопываем одиночные переносы внутри абзаца в пробел (убирает "слово\nслово")
+    text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
+    text = re.sub(r' {2,}', ' ', text).strip()
     formatted = _fmt(text)
     MAX = 4000
     kwargs = {}
@@ -909,9 +1099,10 @@ bot = Bot(token=Secrets.TG_BOT_TOKEN,
           default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp  = Dispatcher()
 
-# состояния для /draw и /voice команд
+# состояния для /draw, /voice, /music команд
 _draw_waiting:  set[str] = set()
 _voice_waiting: set[str] = set()
+_music_waiting: set[str] = set()  # ждём название песни или аудио для /music
 
 
 def uid(msg: Message) -> str:
@@ -1035,16 +1226,171 @@ async def cmd_draw(msg: Message):
 async def cmd_voice(msg: Message):
     u = uid(msg)
     _voice_waiting.add(u)
-    await msg.answer("скидывай текст — озвучу")
+    await msg.answer(random.choice([
+        "чо озвучить? пиши",
+        "ну пиши чо озвучить 🎙",
+        "давай текст",
+        "чо тебе сказать голосом"
+    ]))
+
+
+@dp.message(Command("music"))
+async def cmd_music(msg: Message):
+    u = uid(msg)
+    _music_waiting.add(u)
+    await msg.answer(random.choice([
+        "ну скидывай песню или пиши название 🎵",
+        "чо петь? кидай аудио или пиши название",
+        "название песни давай или скинь аудио"
+    ]))
+
+
+async def music_pipeline(
+    session: aiohttp.ClientSession,
+    msg: Message,
+    u: str,
+    song_query: str | None = None,
+    audio_bytes: bytes | None = None,
+) -> None:
+    """Полный пайплайн /music:
+    1. Ищем вокал (acapella) через yt-dlp или принимаем аудио
+    2. Конвертируем вокал через RVC (голос мурки)
+    3. Ищем инструментал (минус)
+    4. Миксуем через ffmpeg
+    5. Отправляем результат
+    Всё это CPU-side, тяжело — статус обновляем каждый шаг.
+    """
+    status = await msg.answer("🎵 ищу песню...")
+    try:
+        vocals_bytes  = None
+        backing_bytes = None
+
+        if audio_bytes:
+            # Пользователь скинул аудио — используем как вокал напрямую
+            vocals_bytes = audio_bytes
+            await status.edit_text("🎙 конвертирую голос через RVC...")
+        else:
+            # Ищем acapella через OR
+            await status.edit_text(f"🔍 ищу акапеллу «{song_query}»...")
+            acapella_url = await find_acapella_url(session, song_query)
+            if acapella_url:
+                async with session.get(acapella_url, timeout=aiohttp.ClientTimeout(total=60)) as r:
+                    if r.status == 200:
+                        vocals_bytes = await r.read()
+            if not vocals_bytes:
+                await status.edit_text(
+                    f"не нашла акапеллу для «{song_query}», попробуй скинуть аудио сам"
+                )
+                return
+
+        # Конвертируем вокал через RVC
+        await status.edit_text("🎙 пою своим голосом... (это долго, подожди)")
+        rvc_vocals = await rvc_convert_audio(session, vocals_bytes, pitch=0)
+        if not rvc_vocals:
+            await status.edit_text("что-то пошло не так с RVC, попробуй позже")
+            return
+
+        if song_query:
+            # Ищем инструментал
+            await status.edit_text("🎸 ищу инструментал...")
+            backing_url = await find_instrumental_url(session, song_query)
+            if backing_url:
+                async with session.get(backing_url, timeout=aiohttp.ClientTimeout(total=60)) as r:
+                    if r.status == 200:
+                        backing_bytes = await r.read()
+
+        if backing_bytes:
+            # Миксуем вокал + инструментал через ffmpeg
+            await status.edit_text("🎚 миксую трек...")
+            final_audio = await mix_audio_ffmpeg(rvc_vocals, backing_bytes)
+        else:
+            final_audio = rvc_vocals
+
+        await status.delete()
+        await msg.answer_audio(
+            BufferedInputFile(final_audio, "murka_song.mp3"),
+            caption=random.choice([
+                "на жри 🎵",
+                "ну слушай",
+                "вот твоя песня в моём исполнении",
+                "надеюсь норм получилось"
+            ])
+        )
+    except Exception as e:
+        log.exception("music_pipeline")
+        await status.edit_text("что-то сломалось с музыкой, попробуй позже")
+
+
+async def find_acapella_url(session: aiohttp.ClientSession, query: str) -> str | None:
+    """Ищем acapella/vocal track через OR."""
+    result = await _or_post(session, {
+        "model": Secrets.MODEL_LLAMA, "max_tokens": 200,
+        "messages": [{"role": "user", "content":
+            f"Найди прямую ссылку на скачивание acapella (только вокал без музыки) для песни: {query}. "
+            f"Проверенные источники: vocalremover.org, acapellas4u.co.uk, archive.org. "
+            f"Ответь ТОЛЬКО прямой ссылкой на mp3/wav файл, без объяснений. Если не знаешь — ответь НЕТ."}],
+    })
+    if result and result.strip().upper() != "НЕТ" and result.startswith("http"):
+        return result.strip()
+    return None
+
+
+async def find_instrumental_url(session: aiohttp.ClientSession, query: str) -> str | None:
+    """Ищем instrumental/minus track через OR."""
+    result = await _or_post(session, {
+        "model": Secrets.MODEL_LLAMA, "max_tokens": 200,
+        "messages": [{"role": "user", "content":
+            f"Найди прямую ссылку на скачивание instrumental/karaoke версии песни: {query}. "
+            f"Источники: karaoke-lyrics.net, sing2music.com, archive.org. "
+            f"Ответь ТОЛЬКО прямой ссылкой на mp3/wav файл, без объяснений. Если не знаешь — ответь НЕТ."}],
+    })
+    if result and result.strip().upper() != "НЕТ" and result.startswith("http"):
+        return result.strip()
+    return None
+
+
+async def mix_audio_ffmpeg(vocals: bytes, backing: bytes) -> bytes:
+    """Миксует вокал и инструментал через ffmpeg subprocess."""
+    import tempfile, subprocess
+    with tempfile.TemporaryDirectory() as tmpdir:
+        voc_path = os.path.join(tmpdir, "vocals.wav")
+        bck_path = os.path.join(tmpdir, "backing.mp3")
+        out_path = os.path.join(tmpdir, "mixed.mp3")
+        with open(voc_path, "wb") as f: f.write(vocals)
+        with open(bck_path, "wb") as f: f.write(backing)
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", voc_path,
+            "-i", bck_path,
+            "-filter_complex", "[0:a]volume=1.5[v];[1:a]volume=1.0[b];[v][b]amix=inputs=2:duration=longest",
+            "-c:a", "libmp3lame", "-q:a", "2",
+            out_path
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await proc.wait()
+        if os.path.exists(out_path):
+            with open(out_path, "rb") as f:
+                return f.read()
+    return vocals  # fallback — просто вокал без инструментала
 
 
 @dp.message(F.voice | F.audio)
 async def on_audio(msg: Message, aiohttp_session: aiohttp.ClientSession):
-    u      = uid(msg)
+    u = uid(msg)
+    obj   = msg.voice or msg.audio
+    fname = getattr(obj, "file_name", None) or "voice.ogg"
+
+    # Если ждём аудио для /music
+    if u in _music_waiting:
+        _music_waiting.discard(u)
+        raw = await dl(obj.file_id)
+        await music_pipeline(aiohttp_session, msg, u, audio_bytes=raw)
+        return
+
     status = await msg.answer("🎙 слушаю...")
     try:
-        obj   = msg.voice or msg.audio
-        fname = getattr(obj, "file_name", None) or "voice.ogg"
         raw   = await dl(obj.file_id)
         text  = await ai_transcribe(aiohttp_session, raw, fname)
         await status.edit_text(f"🎙 «{text}»\n\nотвечаю...")
@@ -1059,6 +1405,8 @@ async def on_audio(msg: Message, aiohttp_session: aiohttp.ClientSession):
     except Exception as e:
         log.exception("on_audio")
         await status.edit_text(_fallback())
+
+
 
 
 @dp.message(F.photo)
@@ -1166,10 +1514,19 @@ async def on_gif(msg: Message, aiohttp_session: aiohttp.ClientSession):
     streak    = mem.inc_sticker_streak(u)
     img_b64   = None
 
+    # пробуем thumbnail, потом миниатюру через file_id напрямую
     if animation.thumbnail:
         try:
             raw     = await dl(animation.thumbnail.file_id)
             img_b64 = base64.b64encode(raw).decode()
+        except Exception:
+            pass
+    if not img_b64 and animation.file_id:
+        # fallback: первые байты самого файла как jpeg (Telegram иногда отдаёт)
+        try:
+            raw = await dl(animation.file_id)
+            if raw[:3] in (b'\xff\xd8\xff', b'GIF', b'\x89PN'):
+                img_b64 = base64.b64encode(raw[:500000]).decode()
         except Exception:
             pass
 
@@ -1223,6 +1580,85 @@ async def on_gif(msg: Message, aiohttp_session: aiohttp.ClientSession):
         await msg.answer("я хуею с этой гифки")
 
 
+@dp.message(F.video | F.video_note)
+async def on_video(msg: Message, aiohttp_session: aiohttp.ClientSession):
+    u       = uid(msg)
+    caption = (msg.caption or "").strip()
+    stop    = asyncio.Event()
+    asyncio.create_task(_typing_loop(msg.chat.id, stop))
+    try:
+        is_circle = msg.video_note is not None
+        video     = msg.video or msg.video_note
+        img_b64   = None
+
+        if video and video.thumbnail:
+            try:
+                raw     = await dl(video.thumbnail.file_id)
+                img_b64 = base64.b64encode(raw).decode()
+            except Exception: pass
+
+        if is_circle:
+            # Кружок — скачиваем и транскрибируем аудио, отвечаем на содержание
+            status = await msg.answer("👀 смотрю кружок...")
+            try:
+                raw_video = await dl(video.file_id)
+                text      = await ai_transcribe(aiohttp_session, raw_video, "circle.mp4")
+                await status.delete()
+                if text and text.strip():
+                    _auto_gender(u, text)
+                    mem.reset_sticker_streak(u)
+                    answer = await ai_chat(aiohttp_session, u, text)
+                    stop.set()
+                    answer = await maybe_send_sticker(msg, answer)
+                    await send_smart(msg, f"👀 «<i>{text}</i>»\n\n{answer}")
+                    return
+            except Exception as e:
+                log.warning("circle transcribe fail: %s", e)
+                await status.delete()
+            # fallback если транскрипция не вышла — хотя бы посмотреть кадр
+
+        if img_b64:
+            prompt = (
+                ("тебе скинули кружок (видео-сообщение). " if is_circle else "тебе скинули видео. ") +
+                (f"подпись: {caption}. " if caption else "") +
+                "вот первый кадр. опиши что видишь, отреагируй по-своему."
+            )
+            answer = await ai_vision(aiohttp_session, u, prompt, img_b64, "image/jpeg")
+        else:
+            prompt = (
+                ("тебе скинули кружок" if is_circle else "тебе скинули видео") +
+                (f" с подписью '{caption}'" if caption else "") +
+                ". отреагируй в своём стиле."
+            )
+            answer = await ai_chat(aiohttp_session, u, prompt)
+
+        stop.set()
+        answer = await maybe_send_sticker(msg, answer)
+        await send_smart(msg, answer)
+    except Exception:
+        stop.set()
+        log.exception("on_video")
+        await msg.answer(_fallback())
+
+
+# ── поиск картинок через inline-бота @pic ──────────────────────────────────
+async def search_and_send_pic(msg: Message, query: str):
+    """Ищет картинку через инлайн-бота @pic и пересылает результат."""
+    try:
+        results = await bot.get_inline_bot_results("pic", query)
+        if results.results:
+            pick = random.choice(results.results[:5])
+            await bot.send_inline_query_result(
+                chat_id=msg.chat.id,
+                query_id=results.query_id,
+                result_id=pick.id,
+            )
+            return True
+    except Exception as e:
+        log.warning("pic search fail: %s", e)
+    return False
+
+
 @dp.message(F.text)
 async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
     u    = uid(msg)
@@ -1256,20 +1692,40 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
         if u in _voice_waiting:
             _voice_waiting.discard(u)
             stop.set()
-            if not Secrets.RVC_API_URL:
-                await msg.answer("голос не настроен — нужен RVC_API_URL в variables")
-                return
             voice_stop = asyncio.Event()
             asyncio.create_task(_upload_audio_loop(msg.chat.id, voice_stop))
-            status = await msg.answer("🎙 записываю...")
+            status = await msg.answer(random.choice(["🎙 синтезирую...", "пою...", "записываю голосяру"]))
             audio = await rvc_synthesize(aiohttp_session, text)
             voice_stop.set()
             await status.delete()
             if audio:
                 await msg.answer_voice(BufferedInputFile(audio, "murka_voice.ogg"))
             else:
-                await msg.answer("что-то пошло не так с голосом, попробуй позже")
+                await msg.answer(random.choice(["чото не вышло с голосом", "сломалось нахуй", "hf space отдыхает попробуй позже"]))
             return
+
+        # /music — ждём название песни текстом
+        if u in _music_waiting:
+            _music_waiting.discard(u)
+            stop.set()
+            await music_pipeline(aiohttp_session, msg, u, song_query=text)
+            return
+
+        # обработка запроса на картинку (не нарисовать, а найти)
+        pic_match = re.search(
+            r"(?i)(скинь|найди|покажи|кинь|дай).{0,15}(картинк|фото|пик|изображени|мем)",
+            text
+        )
+        if pic_match:
+            # убираем триггеры и ищем
+            query = re.sub(r"(?i)(скинь|найди|покажи|кинь|дай).{0,15}(картинк|фото|пик|изображени|мем)\s*(о|про|с|по)?\s*", "", text).strip()
+            if not query: query = text
+            sent = await search_and_send_pic(msg, query)
+            stop.set()
+            if sent:
+                await send_smart(msg, random.choice(["на", "держи", "вот", "нашла"]))
+                return
+            # если pic не нашёл — просто отвечаем текстом
 
         answer = await ai_chat(aiohttp_session, u, text)
         stop.set()
@@ -1327,6 +1783,39 @@ class SessionMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+class AccessMiddleware(BaseMiddleware):
+    """Проверяет доступ по chat_id. Без ключей, без задержек для разрешённых."""
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any],
+    ) -> Any:
+        if not Secrets.ALLOWED_IDS:
+            return await handler(event, data)
+        msg = data.get("event_update", {})
+        # получаем chat_id из любого типа события
+        chat_id = None
+        if hasattr(event, "chat") and event.chat:
+            chat_id = event.chat.id
+        elif hasattr(event, "message") and event.message:
+            chat_id = event.message.chat.id
+        if chat_id is None:
+            return await handler(event, data)
+        # в чёрном списке — молчим полностью
+        if chat_id in _BLACKLIST:
+            return
+        # не в списке разрешённых — добавляем в чёрный список и один раз отвечаем
+        if chat_id not in Secrets.ALLOWED_IDS:
+            _BLACKLIST.add(chat_id)
+            log.warning("Заблокирован chat_id=%d", chat_id)
+            if isinstance(event, Message):
+                try: await event.answer("нет доступа")
+                except Exception: pass
+            return
+        return await handler(event, data)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1341,7 +1830,8 @@ async def main():
     # регистрируем команды в меню бота
     await bot.set_my_commands([
         BotCommand(command="draw",   description="нарисовать что-нибудь"),
-        BotCommand(command="voice",  description="озвучить текст"),
+        BotCommand(command="voice",  description="озвучить текст голосом мурки"),
+        BotCommand(command="music",  description="спеть песню голосом мурки"),
         BotCommand(command="forget", description="сбросить память"),
         BotCommand(command="memory", description="что я о тебе знаю"),
         BotCommand(command="help",   description="помощь"),
@@ -1349,6 +1839,7 @@ async def main():
 
     async with aiohttp.ClientSession() as session:
         dp.update.middleware(SessionMiddleware(session))
+        dp.update.outer_middleware(AccessMiddleware())
         log.info("Murka Bot v8 запущена")
         await dp.start_polling(bot, skip_updates=True)
 
