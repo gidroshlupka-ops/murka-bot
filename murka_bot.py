@@ -51,8 +51,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("murka_bot.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),  # Railway логи — только stdout
     ]
 )
 log = logging.getLogger("murka_bot")
@@ -1892,33 +1891,7 @@ async def on_video(msg: Message, aiohttp_session: aiohttp.ClientSession):
         await msg.answer(_fallback())
 
 
-# ── поиск картинок через inline-бота @pic ──────────────────────────────────
-async def search_and_send_pic(msg: Message, query: str) -> bool:
-    """Ищет картинку через Pollinations image endpoint и отправляет.
-    get_inline_bot_results требует inline mode — используем генерацию через pollinations
-    как "поиск" (быстро, бесплатно).
-    """
-    from urllib.parse import quote
-    try:
-        encoded = quote(query)
-        seed    = random.randint(1, 999999)
-        # используем модели которые дают реалистичные фото, не арт
-        url = f"https://image.pollinations.ai/prompt/{encoded}?width=800&height=800&nologo=true&nofeed=true&model=flux&seed={seed}"
-        async with msg._bot.session.get(   # type: ignore
-            url,
-            timeout=aiohttp.ClientTimeout(total=60),
-            headers={"User-Agent": "Mozilla/5.0"},
-            allow_redirects=True,
-        ) as r:
-            if r.status == 200:
-                ct   = r.headers.get("content-type", "")
-                data = await r.read()
-                if len(data) > 5000 and "image" in ct:
-                    await msg.answer_photo(BufferedInputFile(data, "pic.jpg"))
-                    return True
-    except Exception as e:
-        log.warning("search_and_send_pic fail: %s", e)
-    return False
+# ── поиск картинок ──────────────────────────────────
 
 
 @dp.message(F.text)
