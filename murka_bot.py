@@ -41,7 +41,7 @@ class Secrets:
     MODEL_CHAT:    str = "google/gemini-2.0-flash"  # 1500 RPD free vs ~20 у 2.5-flash-lite
     MODEL_VISION:  str = "google/gemini-2.5-flash-lite"
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
-    MODEL_LLAMA:   str = "meta-llama/llama-3.1-8b-instruct:free"  # gemma-3 не поддерживает system role → OR 400
+    MODEL_LLAMA:   str = "openrouter/free"  # авто-роутер: выбирает любую доступную бесплатную модель
 
 
 # ══════════════════════════════════════════════════════════════════════════════
