@@ -28,8 +28,8 @@ class Secrets:
         "https://image.pollinations.ai/prompt/{prompt}"
         "?width=768&height=768&nologo=true&enhance=true"
     )
-    MODEL_CHAT:    str = "gemini-2.5-flash-lite"
-    MODEL_VISION:  str = "gemini-2.5-flash-lite"
+    MODEL_CHAT:    str = "google/gemini-2.5-flash-lite"
+    MODEL_VISION:  str = "google/gemini-2.5-flash-lite"
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
     MODEL_LLAMA:   str = "meta-llama/llama-4-scout:free"
 
@@ -432,7 +432,8 @@ async def _or_post(session: aiohttp.ClientSession, payload: dict) -> str:
 
 
 async def _post(session: aiohttp.ClientSession, payload: dict) -> str:
-    # Всё через OpenRouter — прямой Google забанен на Railway
+    if "gemini" in payload.get("model", "").lower():
+        return await _gemini_post(session, payload["messages"], payload["model"])
     return await _or_post(session, payload)
 
 
@@ -509,21 +510,17 @@ async def ai_extract_fact(session: aiohttp.ClientSession, uid_str: str, text: st
 
 
 async def analyze_sticker_img(session, img_b64: str, mt: str = "image/webp") -> dict:
-    raw = await _or_post(session, {
-        "model": Secrets.MODEL_VISION,
-        "max_tokens": 300,
-        "messages": [
-            {"role": "system", "content": "опиши изображение кратко"},
-            {"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": f"data:{mt};base64,{img_b64}"}},
-                {"type": "text", "text":
-                    "Опиши что изображено ОЧЕНЬ кратко в своем стиле (1-2 предложения). "
-                    "Потом теги эмоций через запятую (только теги: "
-                    "funny,hype,sad,angry,love,shocked,cringe,lol,facepalm,cute,based,cope,random). "
-                    "Формат строго:\nDESC: <описание>\nEMO: <теги>"},
-            ]},
-        ],
-    })
+    raw = await _gemini_post(session, [
+        {"role": "system", "content": "опиши изображение кратко"},
+        {"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:{mt};base64,{img_b64}"}},
+            {"type": "text", "text":
+                "Опиши что изображено ОЧЕНЬ кратко в своем стиле (1-2 предложения). "
+                "Потом теги эмоций через запятую (только теги: "
+                "funny,hype,sad,angry,love,shocked,cringe,lol,facepalm,cute,based,cope,random). "
+                "Формат строго:\nDESC: <описание>\nEMO: <теги>"},
+        ]},
+    ], Secrets.MODEL_VISION)
     desc, emo = "стикер", "funny"
     for line in raw.split("\n"):
         if line.startswith("DESC:"): desc = line[5:].strip()
@@ -953,7 +950,7 @@ async def main():
         log.warning("OPENROUTER_KEY не задан!")
     async with aiohttp.ClientSession() as session:
         dp.update.middleware(SessionMiddleware(session))
-        log.info("Murka Bot v8 запущена — OR only")
+        log.info("Murka Bot v7 запущена")
         await dp.start_polling(bot, skip_updates=True)
 
 
