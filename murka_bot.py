@@ -38,10 +38,10 @@ class Secrets:
         "https://image.pollinations.ai/prompt/{prompt}"
         "?width=1024&height=1024&nologo=true&enhance=true&model=flux"
     )
-    MODEL_CHAT:    str = "google/gemini-2.5-flash-lite"
+    MODEL_CHAT:    str = "google/gemini-2.0-flash"  # 1500 RPD free vs ~20 у 2.5-flash-lite
     MODEL_VISION:  str = "google/gemini-2.5-flash-lite"
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
-    MODEL_LLAMA:   str = "google/gemma-3-4b-it:free"   # надёжнее llama free на OR
+    MODEL_LLAMA:   str = "meta-llama/llama-3.1-8b-instruct:free"  # gemma-3 не поддерживает system role → OR 400
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -87,11 +87,18 @@ class KeyManager:
         """True — ключ на жёстком 429-кулдауне."""
         return time.monotonic() < self._cooldown.get(idx, 0)
 
-    def ban_429(self, idx: int):
-        """Вызывается ТОЛЬКО при HTTP 429 от Google."""
-        self._cooldown[idx] = time.monotonic() + self.COOLDOWN
-        remaining = self.COOLDOWN
-        log.info("Ключ #%d → 429-бан на %ds", idx, remaining)
+    def ban_429(self, idx: int, err_body: str = ""):
+        """Вызывается ТОЛЬКО при HTTP 429 от Google.
+        Если лимит дневной (RPD) — баним на 24 ч, иначе на COOLDOWN (65 с).
+        """
+        # "free_tier_requests" в теле = дневной лимит исчерпан
+        if "free_tier" in err_body or "day" in err_body.lower():
+            cd = 86400.0  # 24 часа
+            log.warning("Ключ #%d → RPD-лимит исчерпан, бан на 24ч", idx)
+        else:
+            cd = float(self.COOLDOWN)
+            log.info("Ключ #%d → 429-бан на %ds", idx, int(cd))
+        self._cooldown[idx] = time.monotonic() + cd
 
     def mark_used(self, idx: int):
         self._last_used[idx] = time.monotonic()
@@ -765,7 +772,7 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
                 )
 
                 if resp.status == 429:
-                    _keys.ban_429(idx)
+                    _keys.ban_429(idx, err_body)
                     # принудительно двигаемся на следующий ключ
                     _keys._idx = (idx + 1) % len(_keys._pool)
                     switched  += 1
@@ -811,23 +818,50 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
     return _fallback()
 
 
+# Модели OR, которые НЕ поддерживают role=system (нужно вливать в user).
+# gemma-3 возвращает "Developer instruction is not enabled" → OR 400.
+_OR_NO_SYSTEM_ROLE: set[str] = {
+    "google/gemma-3-4b-it:free",
+    "google/gemma-3-12b-it:free",
+    "google/gemma-3-27b-it:free",
+}
+
+def _or_merge_system(messages: list, model: str) -> list:
+    """Для моделей без system role — вливаем system prompt в первое user-сообщение."""
+    if model not in _OR_NO_SYSTEM_ROLE:
+        return messages
+    sys_parts = [m["content"] for m in messages if m["role"] == "system"]
+    other     = [m for m in messages if m["role"] != "system"]
+    if not sys_parts or not other:
+        return messages
+    sys_text = "\n\n".join(sys_parts)
+    # Вставляем системный контекст перед первым user-сообщением
+    result = []
+    injected = False
+    for m in other:
+        if m["role"] == "user" and not injected:
+            result.append({"role": "user",
+                           "content": f"[Контекст]\n{sys_text}\n\n[Сообщение]\n{m['content']}"})
+            injected = True
+        else:
+            result.append(m)
+    return result
+
+
 async def _or_post(session: aiohttp.ClientSession, payload: dict) -> str:
     """POST к OpenRouter. Совместим с OpenAI API."""
-    # Обязательные заголовки OpenRouter:
-    # - Authorization: Bearer <key>
-    # - HTTP-Referer: идентифицирует приложение (без него часто 400/403)
-    # - X-Title: отображается в дашборде OR (опционально, но желательно)
+    model = payload.get("model", Secrets.MODEL_LLAMA)
+    msgs  = _or_merge_system(payload["messages"], model)
+
     or_headers = {
         "Content-Type":  "application/json",
         "Authorization": f"Bearer {Secrets.OPENROUTER_KEY}",
-        "HTTP-Referer":  "https://t.me/murka_bot",   # ← FIX: обязателен для OR
+        "HTTP-Referer":  "https://t.me/murka_bot",
         "X-Title":       "MurkaBot",
     }
-    # OR требует только поля, совместимые с OpenAI.
-    # Убираем лишние ключи, которые OR не понимает и возвращает 400.
     clean_payload = {
-        "model":       payload.get("model", Secrets.MODEL_LLAMA),
-        "messages":    payload["messages"],
+        "model":       model,
+        "messages":    msgs,
         "max_tokens":  payload.get("max_tokens", 500),
         "temperature": payload.get("temperature", 0.9),
     }
@@ -839,10 +873,8 @@ async def _or_post(session: aiohttp.ClientSession, payload: dict) -> str:
             if resp.status == 200:
                 data = await resp.json()
                 return data["choices"][0]["message"]["content"]
-            # читаем тело — без него "OR 400" ни о чём не говорит
             err_body = await resp.text()
-            log.error("OR %d | модель=%s | тело: %s",
-                      resp.status, clean_payload["model"], err_body[:400])
+            log.error("OR %d | модель=%s | тело: %s", resp.status, model, err_body[:400])
             return _fallback()
     except Exception as e:
         log.error("OR exc: %s", e)
