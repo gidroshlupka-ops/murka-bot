@@ -32,7 +32,7 @@ class Secrets:
     # URL сервиса RVC v2 (ngrok/cloudflare/etc) — POST /synthesize
     RVC_API_URL:    str       = os.environ.get("RVC_API_URL", "")
     GEMINI_POOL:    list[str] = [
-        k for k in [os.environ.get(f"GEMINI_{i}", "") for i in range(1, 21)] if k
+        k for k in [os.environ.get(f"GEMINI_{i}", "") for i in range(1, 31)] if k
     ]
     POLLINATIONS_URL: str = (
         "https://image.pollinations.ai/prompt/{prompt}"
