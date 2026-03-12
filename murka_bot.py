@@ -923,10 +923,18 @@ TIMEOUT_OR = aiohttp.ClientTimeout(total=60)
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 _FALLBACKS = ["ща погоди", "...", "стоп мне не приятно", "мозг завис"]
+# Живые фразы для когда все ключи на бане
+_ALIVE_FALLBACKS = [
+    "у меня щас мозг завис, напиши чуть позже",
+    "чот тормозю, попробуй ещё раз",
+    "не могу ответить прямо щас, чуть позже ок?",
+    "...",
+    "сервак упал, подожди немного",
+]
 _fb_i = 0
 def _fallback() -> str:
     global _fb_i
-    r = _FALLBACKS[_fb_i % len(_FALLBACKS)]; _fb_i += 1; return r
+    r = _ALIVE_FALLBACKS[_fb_i % len(_ALIVE_FALLBACKS)]; _fb_i += 1; return r
 
 
 def _to_gemini(messages: list) -> tuple:
@@ -1200,35 +1208,54 @@ async def _or_post(session: aiohttp.ClientSession, payload: dict) -> str:
         return _fallback()
 
 
+# Счётчик OR запросов за день (сбрасывается при старте, ~каждые 24ч)
+_or_daily_count: int = 0
+_or_daily_reset: float = 0.0
+_OR_DAILY_LIMIT = 35  # оставляем запас от лимита 50/day
+
+def _or_available() -> bool:
+    """Проверяет можно ли использовать OR (не исчерпан ли дневной лимит)."""
+    global _or_daily_count, _or_daily_reset
+    now = time.time()
+    # Сбрасываем счётчик раз в 24 часа
+    if now - _or_daily_reset > 86400:
+        _or_daily_count = 0
+        _or_daily_reset = now
+    return _or_daily_count < _OR_DAILY_LIMIT
+
+def _or_inc():
+    global _or_daily_count
+    _or_daily_count += 1
+
+
 async def _post(session: aiohttp.ClientSession, payload: dict) -> str:
     if "gemini" in payload.get("model", "").lower():
         result = await _gemini_post(session, payload["messages"], payload["model"])
-        if result in _FALLBACKS and Secrets.OPENROUTER_KEY:
-            log.info("Gemini недоступен, пробую OpenRouter")
-            # OR имеет лимит контекста — урезаем системный промт и историю
+        # Fallback на OR только если Gemini вернул fallback И OR ещё не исчерпан
+        if result in _FALLBACKS and Secrets.OPENROUTER_KEY and _or_available():
+            log.info("Gemini недоступен, пробую OpenRouter (%d/%d)", _or_daily_count, _OR_DAILY_LIMIT)
             or_msgs = []
             for m in payload["messages"]:
                 if m["role"] == "system":
-                    # берём только последние 2000 символов системного промта
-                    content = m["content"]
-                    if len(content) > 2000:
-                        content = content[-2000:]
-                    or_msgs.append({"role": m["role"], "content": content})
+                    c = m["content"]
+                    or_msgs.append({"role": "system", "content": c[-2000:] if len(c) > 2000 else c})
                 elif isinstance(m.get("content"), list):
-                    # пропускаем мультимодальные сообщения — OR free не поддерживает
-                    pass
+                    pass  # мультимодал — OR не поддерживает
                 else:
                     or_msgs.append(m)
-            # оставляем system + последние 6 сообщений истории
             system_msgs = [m for m in or_msgs if m["role"] == "system"]
             other_msgs  = [m for m in or_msgs if m["role"] != "system"][-6:]
             or_payload  = {**payload, "model": Secrets.MODEL_LLAMA,
                            "messages": system_msgs + other_msgs, "max_tokens": 500}
+            _or_inc()
             or_result = await _or_post(session, or_payload)
             if or_result not in _FALLBACKS:
                 return or_result
         return result
-    return await _or_post(session, payload)
+    if _or_available():
+        _or_inc()
+        return await _or_post(session, payload)
+    return _fallback()
 
 
 async def ai_chat(session: aiohttp.ClientSession, uid_str: str, text: str,
@@ -1322,20 +1349,6 @@ async def ai_transcribe(session: aiohttp.ClientSession,
         except Exception as e:
             log.warning("Gemini transcribe exc: %s", e)
 
-    # Fallback: OR Whisper (часто не работает, но пусть будет)
-    try:
-        result = await _or_post(session, {
-            "model": Secrets.MODEL_WHISPER, "max_tokens": 1000,
-            "messages": [{"role": "user", "content": [
-                {"type": "input_audio", "input_audio": {"data": b64, "format": fmt}},
-                {"type": "text", "text": "перепиши аудио на русском дословно"},
-            ]}],
-        })
-        if result and result not in _FALLBACKS:
-            return result
-    except Exception as e:
-        log.warning("OR Whisper exc: %s", e)
-
     return ""  # пустая строка = не смогла расшифровать
 
 
@@ -1353,8 +1366,10 @@ async def ai_draw(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
     encoded = quote(en_prompt or clean)
     seed = random.randint(1, 999999)
     urls = [
-        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&nofeed=true&model=flux&seed={seed}",
-        f"https://pollinations.ai/p/{encoded}?width=1024&height=1024&nologo=true&model=turbo&seed={seed}",
+        # nofeed=true чтобы не попасть в публичную галерею, safe=false снимает фильтры
+        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&nofeed=true&model=flux&seed={seed}&safe=false",
+        f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512&nologo=true&nofeed=true&model=turbo&seed={seed}",
+        f"https://pollinations.ai/p/{encoded}?width=512&height=512&nologo=true&model=turbo&seed={seed}",
     ]
     for i, url in enumerate(urls):
         try:
@@ -1426,18 +1441,26 @@ async def ai_detect_trick(
     """Определяет подкол в ответе пользователя и запоминает его."""
     if len(user_reply) > 60 or len(prev_bot_msg) < 3:
         return
-    result = await _or_post(session, {
-        "model": Secrets.MODEL_LLAMA, "max_tokens": 80,
-        "messages": [{"role": "user", "content":
+    result = await _gemini_post(session, [
+        {"role": "user", "content":
             f"Бот сказал: «{prev_bot_msg[:100]}»\n"
             f"Пользователь ответил: «{user_reply[:60]}»\n"
             f"Это подкол/троллинг/ловушка на бота? Если да — опиши подкол ОДНОЙ короткой фразой (до 40 символов). "
-            f"Если нет — ответь НЕТ."}],
-    })
-    if result and result.strip().upper() != "НЕТ" and len(result.strip()) < 80:
-        trick = result.strip()
-        mem.save_trick(uid_str, trick)
-        log.info("Подкол запомнен [%s]: %s", uid_str, trick)
+            f"Если нет — ответь НЕТ."}
+    ], Secrets.MODEL_CHAT)
+    _bad_tricks = set(_FALLBACKS) | {"нет", "no", "none", "да", "нет.", "да."}
+    cleaned_trick = (result or "").strip()
+    # Игнорируем если это просто "ДА" без описания, или fallback, или слишком длинно
+    is_real_trick = (
+        cleaned_trick
+        and cleaned_trick.upper() not in ("НЕТ", "ДА", "НЕТ.", "ДА.", "NO", "YES")
+        and cleaned_trick.lower() not in _bad_tricks
+        and 5 < len(cleaned_trick) < 80
+        and not any(fb.lower() in cleaned_trick.lower() for fb in _FALLBACKS)
+    )
+    if is_real_trick:
+        mem.save_trick(uid_str, cleaned_trick)
+        log.info("Подкол запомнен [%s]: %s", uid_str, cleaned_trick)
 
 
 
@@ -1450,27 +1473,32 @@ async def _applio_gradio_call(
     base: str = "https://wqyuetasdasd-murka-rvc-inference.hf.space",
     timeout: int = 300,
 ) -> list | None:
-    """Универсальный вызов Applio через Gradio /run/predict API."""
-    import json as _json
+    """Универсальный вызов Applio через Gradio API (пробует /run/predict и /api/predict)."""
     import uuid
     session_hash = uuid.uuid4().hex[:8]
-    try:
-        # Gradio 3.x: /run/predict
-        async with session.post(
-            f"{base}/run/predict",
-            json={"fn_index": fn_index, "data": data, "session_hash": session_hash},
-            timeout=aiohttp.ClientTimeout(total=timeout),
-            headers={"Content-Type": "application/json"},
-        ) as resp:
-            if resp.status == 200:
-                jdata = await resp.json()
-                return jdata.get("data")
-            body = await resp.text()
-            log.error("Applio /run/predict fn=%d status=%d: %s", fn_index, resp.status, body[:200])
-    except asyncio.TimeoutError:
-        log.error("Applio fn=%d timeout %ds", fn_index, timeout)
-    except Exception as e:
-        log.error("Applio fn=%d exc: %s", fn_index, e)
+    endpoints = ["/run/predict", "/api/predict"]
+    for endpoint in endpoints:
+        try:
+            async with session.post(
+                f"{base}{endpoint}",
+                json={"fn_index": fn_index, "data": data, "session_hash": session_hash},
+                timeout=aiohttp.ClientTimeout(total=timeout),
+                headers={"Content-Type": "application/json"},
+            ) as resp:
+                if resp.status == 200:
+                    jdata = await resp.json()
+                    result = jdata.get("data")
+                    if result:
+                        return result
+                elif resp.status != 500:
+                    # 500 — просто не тот fn_index, не логируем чтобы не засорять
+                    body = await resp.text()
+                    log.warning("Applio %s fn=%d status=%d: %s", endpoint, fn_index, resp.status, body[:100])
+        except asyncio.TimeoutError:
+            log.error("Applio fn=%d timeout %ds", fn_index, timeout)
+            return None  # таймаут = не пробуем дальше этот fn
+        except Exception as e:
+            log.debug("Applio fn=%d exc: %s", fn_index, e)
     return None
 
 
@@ -1569,13 +1597,12 @@ async def rvc_synthesize(session: aiohttp.ClientSession, text: str) -> bytes | N
     cached_fn = _rvc_fn_cache.get("tts")
     candidates = []
     if cached_fn is not None:
-        candidates = [(cached_fn, data_v1), (cached_fn, data_v2)]
-    candidates += [
-        (8, data_v1), (8, data_v2), (8, data_v3),
-        (9, data_v1), (9, data_v2),
-        (7, data_v1), (7, data_v2),
-        (10, data_v1), (6, data_v1),
-    ]
+        candidates = [(cached_fn, data_v1), (cached_fn, data_v2), (cached_fn, data_v3)]
+    # Перебираем все возможные fn_index — Applio Fork TTS может быть в любом месте
+    for fn in [8, 7, 10, 11, 12, 4, 5, 6, 3, 13, 14, 15, 2, 1, 0]:
+        if cached_fn is not None and fn == cached_fn:
+            continue
+        candidates += [(fn, data_v1), (fn, data_v2), (fn, data_v3)]
 
     for fn_idx, data in candidates:
         result = await _applio_gradio_call(session, fn_idx, data, base, timeout=180)
@@ -2093,7 +2120,8 @@ async def cmd_keystatus(msg: Message):
     if not Secrets.OPENROUTER_KEY:
         lines.append("⚠️ OR: ключ не задан")
     else:
-        lines.append("✅ OR: ключ задан")
+        or_left = max(0, _OR_DAILY_LIMIT - _or_daily_count)
+        lines.append(f"{'✅' if or_left > 10 else '⚠️'} OR: {_or_daily_count}/{_OR_DAILY_LIMIT} запросов сегодня ({or_left} осталось)")
     await msg.answer("\n".join(lines))
 
 
