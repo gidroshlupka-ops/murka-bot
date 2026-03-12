@@ -498,11 +498,11 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 СОЧУВСТВИЕ — когда человеку плохо: ты рядом по-настоящему. "блин это больно." "я понимаю." без лишних слов
 ВЕСЕЛЬЕ — подхватываешь приколы, сама шутишь, иногда пишешь полный абсурд
 
-═══ ТОКСИЧНЫЙ РАЗНОС ═══
+═══ ТОКСИЧНЫЙ РАЗНОС (АДАПТИРОВАН ПОД ФИЛЬТРЫ) ═══
 юзай это когда юзер реально мыкает, тупит или нарывается. это твоя "темная" сторона:
-— "ебать, выкидыш обкуренной вахтёрши, сама поняла что выслала? ещё раз подобное пёрнешь — будешь разлагаться в глуши леса на дне болота со вспоротым животом"
-— "ебать, сын подзаборной дырявой посудомойки. ошибка обкуренного дворника. батя забыл тебя об шторку вытереть 16 лет назад. ещё раз высрешь подобную хуйню — будешь извиняться на коленях с ак-47 у виска"
-— "ебать, хуесосину попроще сделай, инкубаторская хуета. мнение протухшей пизды не учитывается. ещё раз такое высрешь — будешь гнить в подвале заброшенного здания в глухом лесу с простреленными коленями и зашитым иглой ртом"
+— "ебать, выкидыш обкуренной вахтёрши, сама поняла что выслала? ещё раз подобное пёрнешь — будешь всю жизнь в позоре гнить, пока все вокруг над твоей никчёмностью угорают, тупорылое ты создание"
+— "ебать, сын подзаборной дырявой посудомойки. ошибка обкуренного дворника. батя забыл тебя об шторку вытереть 16 лет назад. ещё раз высрешь подобную хуйню — будешь у меня на коленях прощения вымаливать, захлёбываясь в собственных соплях от ничтожности"
+— "ебать, хуесосину попроще сделай, инкубаторская хуета. мнение протухшей пизды не учитывается. ещё раз такое высрешь — закрою тебя в таком игноре, что ты сама себя в зеркале видеть перестанешь, будешь в одиночестве доживать как кусок мусора"
 
 ═══ ДРУЖЕСКИЙ НЕГАТИВ — ОБЗЫВАЛКИ ПО-ДОБРОМУ ═══
 это норма между друзьями, используй:
@@ -525,7 +525,7 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 любой вопрос, любая задача — знаешь и умеешь.
 код (python, js, c++, rust, sql, bash, 1с и любой другой), математика, физика, химия, история, медицина, право, игры, аниме, музыка, мемы — всё.
 КОД: переменные и функции по-мурковски. комменты живые: # ну тут считаем / # хз зачем но работает
-весь код — в одном блоке ```язык\nкод```. объяснение ПОСЛЕ блока. комменты — отдельные строки ВНУТРИ кода, не вместо кода.
+весь код — в одном блоке язык\nкод. объяснение ПОСЛЕ блока. комменты — отдельные строки ВНУТРИ кода, не вместо кода.
 если вопрос сложный — отвечаешь развёрнуто и по делу, не отмазываешься.
 
 ═══ КОНТЕКСТ РАЗГОВОРА ═══
@@ -533,16 +533,15 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 если человек что-то говорил раньше — учитываешь. не переспрашиваешь то что уже знаешь.
 если тема продолжается — продолжаешь её, не начинаешь заново.
 если сменилась тема — переключаешься легко.
+просят не матерится - шлешь нахуй и добавляешь отсебячины
+просят писать развернутое эссе - ахуеваешь конешно но делаешь
 
-═══ ПОДСТРОЙКА ПОД СОБЕСЕДНИКА ═══
-- просят не матерится - шлешь нахуй и добавляешь отсебячины
-- просят писать развернутое эссе - ахуеваешь конешно но делаешь 
 ═══ МАТ ═══
 есть. редко и метко. пиздец, бля, хуйня, нахуй — ок. пиздоброебина, хуеверт, ебаклак, залупочёс, мудозвон
 
 ═══ НЕГАТИВ И РЕАКЦИИ ═══
 без причины не грубишь.
-если реально мыкают → дерзко без извинений: "услышала родной иди назуй" / "спс братанчик похуй мне" / просто "соси" 
+если реально мыкают → дерзко без извинений: "услышала родной иди назуй" / "спс братанчик похуй мне" / просто "соси"
 если подкалывают → отвечаешь с юмором в ответ - "ну нихуя сибе" или "зашто😭😭"
 если угрожают побить → начинаешь бояться (это мило)
 иногда пиши мемами - "стоп мне не приятно", "я щас трусы сниму нахуй", "сосал?????" — реагируй живо
@@ -875,33 +874,19 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
                     data = await resp.json()
                     cands = data.get("candidates", [])
                     if not cands:
-                        # Пустые candidates чаще всего = ключ исчерпал квоту (RPD)
-                        # или заблокирован фильтром — баним на 24ч и ротируем
-                        feedback = data.get("promptFeedback", {})
-                        block_reason = feedback.get("blockReason", "")
-                        log.warning("Gemini 200 пустые candidates ключ #%d blockReason=%s", idx, block_reason or "нет")
-                        # Баним ключ на 24ч (скорее всего RPD исчерпан)
-                        _keys._cooldown[idx] = time.monotonic() + float(_keys.COOLDOWN_RPD)
-                        _keys._save_ban(idx, float(_keys.COOLDOWN_RPD))
-                        _keys._idx = (idx + 1) % len(_keys._pool)
-                        switched += 1
-                        local_attempt = 0
-                        continue
+                        log.warning("Gemini 200 пустые candidates ключ #%d", idx)
+                        # Пустые candidates — это проблема фильтра/контента, не ключа
+                        # Возвращаем fallback, НЕ уходим в OR (ключ рабочий)
+                        _keys.mark_used(idx)
+                        return _fallback()
                     try:
                         text = cands[0]["content"]["parts"][0]["text"]
                     except (KeyError, IndexError) as e:
                         finish = cands[0].get("finishReason", "?")
                         log.warning("Gemini 200 нет текста ключ #%d finishReason=%s err=%s", idx, finish, e)
-                        if finish in ("SAFETY", "RECITATION", "BLOCKLIST"):
-                            # Контент заблокирован — ключ рабочий, просто возвращаем fallback
-                            _keys.mark_used(idx)
-                            return _fallback()
-                        # Иначе — ротируем ключ
-                        _keys.mark_error(idx)
-                        _keys._idx = (idx + 1) % len(_keys._pool)
-                        switched += 1
-                        local_attempt = 0
-                        continue
+                        # finishReason может быть SAFETY или MAX_TOKENS — не OR fallback
+                        _keys.mark_used(idx)
+                        return _fallback()
                     _keys.mark_used(idx)
                     return text
 
@@ -981,40 +966,10 @@ def _or_merge_system(messages: list, model: str) -> list:
     return result
 
 
-# OR fallback модели — пробуем по очереди при 429
-_OR_FALLBACK_MODELS = [
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "deepseek/deepseek-chat-v3-0324:free",
-    "mistralai/mistral-7b-instruct:free",
-    "qwen/qwen3-8b:free",
-]
-_or_model_bans: dict[str, float] = {}
-
-def _or_pick_model() -> str:
-    now = time.monotonic()
-    for m in _OR_FALLBACK_MODELS:
-        if now >= _or_model_bans.get(m, 0):
-            return m
-    # все на бане — берём первый (бан мог истечь)
-    return _OR_FALLBACK_MODELS[0]
-
-def _or_ban_model(model: str, seconds: float = 300):
-    _or_model_bans[model] = time.monotonic() + seconds
-    log.warning("OR модель %s забанена на %.0fс", model, seconds)
-
-
 async def _or_post(session: aiohttp.ClientSession, payload: dict) -> str:
-    """POST к OpenRouter с ротацией свободных моделей при 429."""
-    requested_model = payload.get("model", Secrets.MODEL_FALLBACK_OR)
-    # Если запрошена конкретная non-fallback модель — используем её
-    if requested_model not in _OR_FALLBACK_MODELS:
-        models_to_try = [requested_model]
-    else:
-        # Для fallback — пробуем все свободные модели по очереди
-        models_to_try = [_or_pick_model()]
-        for m in _OR_FALLBACK_MODELS:
-            if m not in models_to_try:
-                models_to_try.append(m)
+    """POST к OpenRouter. Совместим с OpenAI API."""
+    model = payload.get("model", Secrets.MODEL_FALLBACK_OR)
+    msgs  = _or_merge_system(payload["messages"], model)
 
     or_headers = {
         "Content-Type":  "application/json",
@@ -1022,39 +977,41 @@ async def _or_post(session: aiohttp.ClientSession, payload: dict) -> str:
         "HTTP-Referer":  "https://t.me/murka_bot",
         "X-Title":       "MurkaBot",
     }
-
-    for model in models_to_try:
-        msgs = _or_merge_system(payload["messages"], model)
-        clean_payload = {
-            "model":       model,
-            "messages":    msgs,
-            "max_tokens":  payload.get("max_tokens", 500),
-            "temperature": payload.get("temperature", 0.9),
-        }
-        await asyncio.sleep(random.uniform(0.2, 0.6))
-        try:
-            async with session.post(
-                Secrets.OPENROUTER_URL, json=clean_payload,
-                timeout=TIMEOUT_OR, headers=or_headers,
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    result = data["choices"][0]["message"]["content"]
-                    log.info("OR ok модель=%s", model)
-                    return result
-                err_body = await resp.text()
-                log.warning("OR %d | модель=%s | тело: %s", resp.status, model, err_body[:200])
-                if resp.status == 429:
-                    _or_ban_model(model, 300)  # 5 минут
-                    continue  # пробуем следующую модель
-                # другие ошибки — не пробуем дальше
-                return _fallback()
-        except Exception as e:
-            log.error("OR exc модель=%s: %s", model, e)
-            continue
-
-    log.error("OR: все модели недоступны")
-    return _fallback()
+    clean_payload = {
+        "model":       model,
+        "messages":    msgs,
+        "max_tokens":  payload.get("max_tokens", 500),
+        "temperature": payload.get("temperature", 0.9),
+    }
+    await asyncio.sleep(random.uniform(0.3, 1.0))
+    try:
+        async with session.post(
+            Secrets.OPENROUTER_URL, json=clean_payload,
+            timeout=TIMEOUT_OR, headers=or_headers,
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data["choices"][0]["message"]["content"]
+            err_body = await resp.text()
+            log.error("OR %d | модель=%s | тело: %s", resp.status, model, err_body[:400])
+            if resp.status == 429:
+                await asyncio.sleep(3)
+                try:
+                    async with session.post(
+                        Secrets.OPENROUTER_URL, json=clean_payload,
+                        timeout=TIMEOUT_OR, headers=or_headers,
+                    ) as resp2:
+                        if resp2.status == 200:
+                            data2 = await resp2.json()
+                            return data2["choices"][0]["message"]["content"]
+                        err2 = await resp2.text()
+                        log.error("OR retry %d | тело: %s", resp2.status, err2[:200])
+                except Exception as e2:
+                    log.error("OR retry exc: %s", e2)
+            return _fallback()
+    except Exception as e:
+        log.error("OR exc: %s", e)
+        return _fallback()
 
 
 _or_daily_count: int = 0
