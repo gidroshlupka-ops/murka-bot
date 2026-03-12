@@ -1219,11 +1219,14 @@ async def _post(session: aiohttp.ClientSession, payload: dict) -> str:
 
 
 async def ai_chat(session: aiohttp.ClientSession, uid_str: str, text: str,
-                  extra_context: str = "", model: str | None = None) -> str:
+                  extra_context: str = "", model: str | None = None,
+                  reply_context: str = "") -> str:
     history = mem.get_history(uid_str)
     system  = _build_system(uid_str)
     if extra_context:
         system += f"\n\n[файл от юзера]\n{extra_context}"
+    if reply_context:
+        system += f"\n\n{reply_context}"
     messages = [{"role": "system", "content": system}] + history + \
                [{"role": "user", "content": text}]
     answer = await _post(session, {
@@ -2709,7 +2712,19 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
             # pic не нашёл — отвечаем текстом как обычно
 
         mem.touch(u)
-        answer = await ai_chat(aiohttp_session, u, text)
+        # если юзер ответил (reply) на конкретное сообщение — передаём его как контекст
+        reply_ctx = ""
+        if msg.reply_to_message:
+            rt = msg.reply_to_message
+            # берём текст или caption того сообщения
+            rt_text = rt.text or rt.caption or ""
+            if rt_text:
+                # определяем чьё это было сообщение
+                if rt.from_user and rt.from_user.id == (await msg.bot.get_me()).id:
+                    reply_ctx = f"[юзер отвечает на ТВОЁ сообщение: «{rt_text[:400]}»]"
+                else:
+                    reply_ctx = f"[юзер отвечает на сообщение: «{rt_text[:400]}»]"
+        answer = await ai_chat(aiohttp_session, u, text, reply_context=reply_ctx)
         stop.set()
         answer = await maybe_send_sticker(msg, answer)
         await send_smart(msg, answer)
