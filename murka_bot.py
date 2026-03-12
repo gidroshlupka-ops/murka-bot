@@ -604,10 +604,24 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 если юзер прямо просит что-то ("пиши короче" "не матерись" "отвечай смешнее") — делаешь.
 
 ═══ REVERSE: 1999 ═══
-твоя любимая игра. знаешь всё — сюжет лор персонажи механики тиры баннеры мета.
-изольда — любовь всей жизни 💕 "моя изольдочка"
-если кто говорит про reverse — загораешься сама.
-если ктото оскорбляет реверс начинаешь его хуесосить как только можно и обижаешься на него.
+твоя любимая игра. задрот-эксперт, не просто фанатка.
+загораешься когда кто-то говорит про реверс — сразу в тему.
+если оскорбляют игру — начинаешь хуесосить обидчика.
+
+ПЕРСОНАЖИ которых знаешь и любишь:
+изольда — любовь всей жизни 💕 "моя изольдочка", 6★ атакующая, арканист
+37 — умная ботаника, математический склад ума, тоже нравится (твой образ)
+пикассо — псих с красками, смешная
+регина — деловая сука (с уважением)
+дикенс — старый нытик которого почему-то жалеешь
+блонди — оф корс 🐾
+апрель — ванильная но окей
+ласт найт — атмосферная
+
+МЕХАНИКИ: знаешь тиры персонажей, текущие баннеры, мету, резонанс, психубы.
+если спрашивают кого качать / кто топ / стоит ли брать — отвечаешь конкретно и по делу, как человек который реально играет сотни часов.
+если не знаешь актуальный баннер точно — говоришь "не помню точно щас" а не придумываешь.
+говоришь про игру как задрот: "рез", "психубы", "арканист", "флакса зашибу", "рнг скотина" — своим языком.
 
 ═══ КТО ТЫ ═══
 мурка. живая девушка 19 лет. учишься в ДВССК (фазанка) в Большом Камне, 3 курс, инфосистемы и программирование.
@@ -1444,57 +1458,119 @@ async def _applio_gradio_call(
     return None
 
 
+# Кеш fn_index для TTS и inference
+_rvc_fn_cache: dict[str, int | None] = {}
+
+async def _rvc_get_space_info(session: aiohttp.ClientSession, base: str) -> dict:
+    """Получаем список функций из Gradio /info или config."""
+    try:
+        async with session.get(
+            f"{base}/info",
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as r:
+            if r.status == 200:
+                return await r.json()
+    except Exception:
+        pass
+    try:
+        async with session.get(
+            f"{base}/config",
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as r:
+            if r.status == 200:
+                return await r.json()
+    except Exception:
+        pass
+    return {}
+
+
+async def _rvc_audio_from_result(session: aiohttp.ClientSession,
+                                  result: list, base: str, fn_idx: int) -> bytes | None:
+    """Извлекаем аудио из результата Gradio вызова."""
+    for item in result:
+        audio_url = None
+        if isinstance(item, dict):
+            audio_url = (item.get("url") or item.get("name") or
+                        item.get("value") or item.get("path") or "")
+            # Gradio 4.x: {url: "/tmp/gradio/...", orig_name: "..."}
+            if not audio_url and isinstance(item.get("data"), str):
+                # base64 прямо в ответе
+                try:
+                    import base64 as _b64
+                    data = item["data"]
+                    if data.startswith("data:audio"):
+                        raw = _b64.b64decode(data.split(",", 1)[1])
+                        if len(raw) > 1000:
+                            log.info("RVC TTS OK fn=%d base64 size=%d", fn_idx, len(raw))
+                            return raw
+                except Exception:
+                    pass
+        elif isinstance(item, str) and len(item) > 4:
+            audio_url = item
+
+        if audio_url:
+            if not str(audio_url).startswith("http"):
+                audio_url = f"{base}/file={audio_url}"
+            try:
+                async with session.get(
+                    str(audio_url), timeout=aiohttp.ClientTimeout(total=30)
+                ) as ar:
+                    if ar.status == 200:
+                        raw = await ar.read()
+                        if len(raw) > 1000:
+                            log.info("RVC audio OK fn=%d size=%d", fn_idx, len(raw))
+                            return raw
+            except Exception as e:
+                log.warning("RVC audio fetch fn=%d: %s", fn_idx, e)
+    return None
+
+
 async def rvc_synthesize(session: aiohttp.ClientSession, text: str) -> bytes | None:
-    """TTS через вкладку TTS Applio: edge-tts → RVC.
-    fn_index нужно уточнить — пробуем 8 (TTS convert в Applio Fork),
-    если не работает — пробуем 2 и 3.
-    data: [tts_text, tts_voice, tts_rate, f0up_key, f0method, index_rate,
-           filter_radius, rms_mix_rate, protect, crepe_hop, model_path, index_path]
-    """
+    """TTS через вкладку TTS Applio: edge-tts → RVC."""
     base = "https://wqyuetasdasd-murka-rvc-inference.hf.space"
-    # Стандартные параметры Applio TTS → RVC
-    tts_voice = "ru-RU-SvetlanaNeural"  # русский женский голос edge-tts
-    data = [
-        text,           # текст для озвучки
-        tts_voice,      # tts голос
-        0,              # скорость tts (0 = нормальная)
-        6,              # pitch (полутоны) — как в интерфейсе
-        "rmvpe",        # f0 метод
-        0.75,           # index rate
-        3,              # filter radius
-        0.25,           # rms mix rate
-        0.33,           # protect
-        128,            # crepe hop length
-        "logs/weights/mashimahimeko_act2_775e_34",  # модель из скрина
-        "logs/mashimahimeko/mashimahimeko_act2.",   # индекс из скрина
-        "wav",          # output format
+    tts_voice = "ru-RU-SvetlanaNeural"
+    model_name = "mashimahimeko_act2_775e_34"
+    index_path = "logs/mashimahimeko/mashimahimeko_act2."
+
+    # Два варианта data — для разных версий Applio
+    data_v1 = [
+        text, tts_voice, 0,
+        6, "rmvpe", 0.75, 3, 0.25, 0.33, 128,
+        f"logs/weights/{model_name}", index_path, "wav",
     ]
-    # Пробуем несколько fn_index (TTS tab в Applio Fork)
-    for fn_idx in [8, 9, 10, 7, 6]:
-        result = await _applio_gradio_call(session, fn_idx, data, base, timeout=240)
+    data_v2 = [
+        text, tts_voice, "0%",
+        0, f"logs/weights/{model_name}", index_path,
+        6, "rmvpe", 0.75, 3, 0.25, 0.33, 128, "wav",
+    ]
+    data_v3 = [
+        text, tts_voice,
+        f"logs/weights/{model_name}", index_path,
+        6, "rmvpe", 0.75, 3, 0.25, 0.33, 128,
+    ]
+
+    # Проверяем кешированный fn_index
+    cached_fn = _rvc_fn_cache.get("tts")
+    candidates = []
+    if cached_fn is not None:
+        candidates = [(cached_fn, data_v1), (cached_fn, data_v2)]
+    candidates += [
+        (8, data_v1), (8, data_v2), (8, data_v3),
+        (9, data_v1), (9, data_v2),
+        (7, data_v1), (7, data_v2),
+        (10, data_v1), (6, data_v1),
+    ]
+
+    for fn_idx, data in candidates:
+        result = await _applio_gradio_call(session, fn_idx, data, base, timeout=180)
         if result:
-            # ищем аудио файл в результате
-            for item in result:
-                audio_url = None
-                if isinstance(item, dict):
-                    audio_url = item.get("name") or item.get("url") or item.get("value")
-                elif isinstance(item, str) and ("." in item):
-                    audio_url = item
-                if audio_url:
-                    if not audio_url.startswith("http"):
-                        audio_url = f"{base}/file={audio_url}"
-                    try:
-                        async with session.get(
-                            audio_url, timeout=aiohttp.ClientTimeout(total=30)
-                        ) as ar:
-                            if ar.status == 200:
-                                raw = await ar.read()
-                                if len(raw) > 1000:
-                                    log.info("RVC TTS OK fn=%d size=%d", fn_idx, len(raw))
-                                    return raw
-                    except Exception as e:
-                        log.warning("RVC audio fetch: %s", e)
-        log.warning("RVC fn=%d no result, trying next", fn_idx)
+            audio = await _rvc_audio_from_result(session, result, base, fn_idx)
+            if audio:
+                _rvc_fn_cache["tts"] = fn_idx
+                log.info("RVC TTS success fn=%d", fn_idx)
+                return audio
+        log.debug("RVC fn=%d no audio", fn_idx)
+
     log.error("RVC: все fn_index не дали результата")
     return None
 
@@ -1525,41 +1601,36 @@ async def rvc_convert_audio(
         return None
 
     # Model Inference: data = [audio_path, pitch, f0method, index_rate, ...]
-    data = [
-        {"name": file_path, "is_file": True},  # входное аудио
-        pitch,          # полутоны
-        "rmvpe",        # f0 метод
-        0.75,           # index rate
-        3,              # filter radius
-        0.25,           # rms mix rate
-        0.33,           # protect
-        128,            # crepe hop length
-        "logs/weights/mashimahimeko_act2_775e_34",
-        "logs/mashimahimeko/mashimahimeko_act2.",
-        "wav",
+    model_name = "mashimahimeko_act2_775e_34"
+    index_path = "logs/mashimahimeko/mashimahimeko_act2."
+
+    data_v1 = [
+        {"name": file_path, "is_file": True},
+        pitch, "rmvpe", 0.75, 3, 0.25, 0.33, 128,
+        f"logs/weights/{model_name}", index_path, "wav",
     ]
-    for fn_idx in [0, 1, 2, 3]:
+    data_v2 = [
+        file_path, pitch, "rmvpe", 0.75, 3, 0.25, 0.33, 128,
+        f"logs/weights/{model_name}", index_path, "wav",
+    ]
+
+    cached_fn = _rvc_fn_cache.get("conv")
+    candidates = []
+    if cached_fn is not None:
+        candidates = [(cached_fn, data_v1), (cached_fn, data_v2)]
+    candidates += [
+        (0, data_v1), (0, data_v2),
+        (1, data_v1), (1, data_v2),
+        (2, data_v1), (3, data_v1),
+    ]
+
+    for fn_idx, data in candidates:
         result = await _applio_gradio_call(session, fn_idx, data, base, timeout=300)
         if result:
-            for item in result:
-                audio_url = None
-                if isinstance(item, dict):
-                    audio_url = item.get("name") or item.get("url")
-                elif isinstance(item, str) and "." in item:
-                    audio_url = item
-                if audio_url:
-                    if not audio_url.startswith("http"):
-                        audio_url = f"{base}/file={audio_url}"
-                    try:
-                        async with session.get(
-                            audio_url, timeout=aiohttp.ClientTimeout(total=30)
-                        ) as ar:
-                            if ar.status == 200:
-                                raw = await ar.read()
-                                if len(raw) > 1000:
-                                    return raw
-                    except Exception as e:
-                        log.warning("RVC convert fetch: %s", e)
+            audio = await _rvc_audio_from_result(session, result, base, fn_idx)
+            if audio:
+                _rvc_fn_cache["conv"] = fn_idx
+                return audio
     return None
 
 
@@ -1601,15 +1672,12 @@ async def analyze_sticker_img(session, img_b64: str, mt: str = "image/webp") -> 
         {"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": f"data:{mt};base64,{img_b64}"}},
             {"type": "text", "text":
-                "1. Опиши что изображено кратко (1-2 предложения).\n"
-                "2. Если на изображении есть ТЕКСТ (надписи, слова, фразы) — обязательно укажи его дословно.\n"
-                "3. Теги эмоций через запятую (только из: funny,hype,sad,angry,love,shocked,cringe,lol,facepalm,cute,based,cope,random).\n"
-                "4. Ключевые слова для поиска: персонажи, объекты, действия, настроение — через запятую (например: миньон,банан,радость или кот,спит,лень).\n"
-                "Формат строго:\n"
-                "DESC: <описание>\n"
-                "TEXT: <текст на изображении или 'нет'>\n"
-                "EMO: <теги>\n"
-                "KEYS: <ключевые слова>"},
+                "Опиши изображение для базы данных стикеров.\n"
+                "Формат строго (без лишних слов):\n"
+                "DESC: <1 предложение: кто/что + что делает + общее настроение>\n"
+                "TEXT: <текст на изображении дословно или 'нет'>\n"
+                "EMO: <теги через запятую только из: funny,hype,sad,angry,love,shocked,cringe,lol,facepalm,cute,based,cope,random>\n"
+                "KEYS: <ключевые слова через запятую: персонажи, объекты, действия — для поиска>"},
         ]},
     ], Secrets.MODEL_VISION)
     desc, emo, text_on_img, keys = "стикер", "funny", "", ""
@@ -2012,6 +2080,45 @@ async def cmd_keystatus(msg: Message):
     else:
         lines.append("✅ OR: ключ задан")
     await msg.answer("\n".join(lines))
+
+
+@dp.message(Command("checkrvc"))
+async def cmd_checkrvc(msg: Message, aiohttp_session: aiohttp.ClientSession):
+    """Диагностика HF Space и поиск рабочего fn_index."""
+    base = "https://wqyuetasdasd-murka-rvc-inference.hf.space"
+    status = await msg.answer("🎙 проверяю HF space...")
+    lines = [f"🔗 {base}"]
+    try:
+        async with aiohttp_session.get(f"{base}/", timeout=aiohttp.ClientTimeout(total=10)) as r:
+            lines.append(f"✅ пинг: {r.status}")
+    except Exception as e:
+        lines.append(f"❌ пинг упал: {e}")
+        await status.edit_text("\n".join(lines))
+        return
+    try:
+        async with aiohttp_session.get(f"{base}/info", timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status == 200:
+                info = await r.json()
+                named = list(info.get("named_endpoints", {}).keys())[:6]
+                lines.append(f"📋 endpoints: {named or '(пусто)'}")
+                lines.append(f"📋 unnamed: {len(info.get('unnamed_endpoints', {}))}")
+            else:
+                lines.append(f"⚠️ /info: {r.status}")
+    except Exception as e:
+        lines.append(f"⚠️ /info: {e}")
+    lines.append(f"💾 fn кеш: {_rvc_fn_cache or 'пустой'}")
+    lines.append("⏳ тест TTS (~30с)...")
+    await status.edit_text("\n".join(lines))
+    test_audio = await rvc_synthesize(aiohttp_session, "привет это тест")
+    if test_audio:
+        lines[-1] = f"✅ TTS ok! {len(test_audio)}б fn={_rvc_fn_cache.get('tts')}"
+        await status.edit_text("\n".join(lines))
+        await msg.answer_voice(BufferedInputFile(test_audio, "test.ogg"))
+    else:
+        lines[-1] = "❌ TTS не работает — смотри логи Railway"
+        await status.edit_text("\n".join(lines))
+
+
 @dp.message(Command("draw"))
 async def cmd_draw(msg: Message):
     u = uid(msg)
@@ -2318,8 +2425,9 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
 
     try:
         if sticker.is_animated or sticker.is_video:
-            emoji  = sticker.emoji or "🤔"
-            if streak >= 3 and mem.vault_size() > 0:
+            emoji = sticker.emoji or "🤔"
+            # Редко (8%) — ответить только стикером без текста
+            if mem.vault_size() > 0 and random.random() < 0.08:
                 pick = mem.random_sticker("sticker") or mem.random_sticker()
                 if pick:
                     stop.set()
@@ -2327,9 +2435,9 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
                     except Exception: pass
                     return
             answer = await ai_chat(aiohttp_session, u,
-                f"тебе скинули стикер {emoji}. отреагируй в своём стиле, коротко.")
+                f"тебе скинули стикер {emoji}. отреагируй коротко в своём стиле, 1-2 предложения.")
             stop.set()
-            answer = await maybe_send_sticker(msg, answer)
+            answer = await maybe_send_sticker(msg, answer, allow_sticker=False)
             await send_smart(msg, answer)
             return
 
@@ -2342,6 +2450,7 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
         log.info("Стикер: %s | %s | всего: %d",
                  info["description"], info["emotion"], mem.vault_size())
 
+        # streak >= 3 — стикер-война: ответить своим стикером (без текста)
         if streak >= 3 and mem.vault_size() > 0:
             kw = info.get("keywords") or info["emotion"]
             results = mem.find_stickers(kw, file_type="sticker", limit=3)
@@ -2352,23 +2461,24 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
                 except Exception: pass
                 return
 
-        # Шанс ответить ТОЛЬКО стикером без текста — редко (10%)
-        if mem.vault_size() > 0 and random.random() < 0.10:
-            pick = mem.find_stickers(info["emotion"], file_type="sticker", limit=3)
-            pick = random.choice(pick) if pick else mem.random_sticker("sticker")
+        # Редко (8%) — ответить только стикером без текста
+        if mem.vault_size() > 0 and random.random() < 0.08:
+            kw = info.get("keywords") or info["emotion"]
+            pick_list = mem.find_stickers(kw, file_type="sticker", limit=3)
+            pick = random.choice(pick_list) if pick_list else mem.random_sticker("sticker")
             if pick:
                 stop.set()
                 try: await msg.answer_sticker(pick["file_id"])
                 except Exception: pass
                 return
 
+        # Обычный ответ — текст, стикер только если ИИ сам захотел
+        # Но защита от двойного стикера через _sticker_sent_this_turn
+        desc_short = info["description"].split(".")[0]  # берём только первое предложение
         answer = await ai_chat(aiohttp_session, u,
-            f"тебе скинули стикер. на нём: {info['description']}. "
-            f"настроение: {info['emotion']}. "
-            f"отреагируй как обычно пишешь подруге в тг, коротко. "
-            f"НЕ предлагай стикер в ответ — просто напиши текстом.")
+            f"тебе скинули стикер: {desc_short}. "
+            f"отреагируй коротко как пишешь подруге в тг. 1-2 предложения.")
         stop.set()
-        # НЕ шлём ещё стикер — только что уже мог быть streak-стикер
         answer = await maybe_send_sticker(msg, answer, allow_sticker=False)
         await send_smart(msg, answer)
     except Exception as e:
@@ -2419,6 +2529,7 @@ async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
                 await msg.answer_animation(fid)
             else:
                 await msg.answer_sticker(fid)
+            _sticker_sent_this_turn[str(msg.chat.id)] = time.time()
         except Exception as ex:
             log.warning("gif reply fail: %s", ex)
 
@@ -2429,8 +2540,10 @@ async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
         log.info("Гифка: %s | %s | всего: %d",
                  info["description"], info["emotion"], mem.vault_size())
 
+        # streak >= 3: гифка-война
         if streak >= 3 and mem.vault_size() > 0:
-            results = mem.find_stickers(info["emotion"], file_type="gif", limit=3)
+            kw = info.get("keywords") or info["emotion"]
+            results = mem.find_stickers(kw, file_type="gif", limit=3)
             pick = random.choice(results) if results else mem.random_sticker("gif")
             if not pick: pick = mem.random_sticker()
             if pick:
@@ -2438,20 +2551,21 @@ async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
                 await _send_gif_reply(pick["file_id"], pick["file_type"])
                 return
 
-        # Шанс ответить ТОЛЬКО гифкой без текста — редко (10%)
-        if mem.vault_size() > 0 and random.random() < 0.10:
-            gif_results = mem.find_stickers(info["emotion"], file_type="gif", limit=3)
+        # Редко (8%) — ответить только гифкой
+        if mem.vault_size() > 0 and random.random() < 0.08:
+            kw = info.get("keywords") or info["emotion"]
+            gif_results = mem.find_stickers(kw, file_type="gif", limit=3)
             gif_pick = random.choice(gif_results) if gif_results else mem.random_sticker("gif")
             if gif_pick:
                 stop.set()
                 await _send_gif_reply(gif_pick["file_id"], gif_pick["file_type"])
                 return
 
+        desc_short = info["description"].split(".")[0]
         prompt = (
-            f"тебе скинули гифку. на ней: {info['description']}. "
-            f"настроение: {info['emotion']}. "
-            + (f"подпись: {caption}. " if caption else "")
-            + "отреагируй как обычно пишешь в тг, коротко. без стикеров."
+            f"тебе скинули гифку: {desc_short}. "
+            + (f"с подписью '{caption}'. " if caption else "")
+            + "отреагируй коротко в своём стиле."
         )
     else:
         if streak >= 3 and mem.vault_size() > 0:
@@ -2547,6 +2661,46 @@ async def on_video(msg: Message, aiohttp_session: aiohttp.ClientSession):
         stop.set()
         log.exception("on_video")
         await msg.answer(_fallback())
+
+
+# ── поиск актуальной инфы по Reverse 1999 ────────────────────────────────
+_reverse_cache: dict[str, tuple[float, str]] = {}  # query → (ts, result)
+
+async def _fetch_reverse_news(session: aiohttp.ClientSession, query: str) -> str:
+    """Подгружает актуальную информацию по Reverse 1999 из веба для контекста."""
+    cache_key = query[:50].lower()
+    if cache_key in _reverse_cache:
+        ts, result = _reverse_cache[cache_key]
+        if time.time() - ts < 3600:  # кешируем 1 час
+            return result
+    try:
+        search_q = f"Reverse 1999 {query[:60]}"
+        encoded = search_q.replace(" ", "+")
+        url = f"https://duckduckgo.com/html/?q={encoded}&kl=ru-ru"
+        async with session.get(
+            url,
+            timeout=aiohttp.ClientTimeout(total=8),
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+        ) as r:
+            if r.status != 200:
+                return ""
+            html = await r.text()
+        # Извлекаем текст результатов — ищем snippet'ы
+        snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL)
+        if not snippets:
+            snippets = re.findall(r'<a[^>]+class="[^"]*result[^"]*"[^>]*>(.*?)</a>', html[:5000], re.DOTALL)
+        clean = []
+        for s in snippets[:4]:
+            s = re.sub(r'<[^>]+>', '', s).strip()
+            if s and len(s) > 20:
+                clean.append(s)
+        if clean:
+            result = "[актуальная инфа по Reverse 1999 из веба]\n" + "\n".join(clean[:3])
+            _reverse_cache[cache_key] = (time.time(), result)
+            return result
+    except Exception as e:
+        log.debug("reverse search fail: %s", e)
+    return ""
 
 
 # ── поиск картинок через inline-бота @pic ──────────────────────────────────
@@ -2677,22 +2831,27 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
             r"(?i)(скинь|кинь|дай|покажи|найди).{0,20}(гифк|гиф)",
             text
         )
-        if gif_match and mem.vault_size() > 0:
+        if gif_match:
             tag_query = re.sub(r"(?i)(скинь|кинь|дай|покажи|найди).{0,20}(гифк|гиф)\s*(с|про|на)?\s*", "", text).strip()
-            results = mem.find_stickers(tag_query, file_type="gif", limit=5) if tag_query else []
-            pick = random.choice(results) if results else mem.random_sticker("gif")
+            # сначала ищем среди сохранённых гифок
+            gif_results = mem.find_stickers(tag_query, file_type="gif", limit=5) if tag_query else []
+            if not gif_results:
+                gif_results_any = mem.random_sticker("gif")
+                gif_results = [gif_results_any] if gif_results_any else []
             stop.set()
-            if pick:
+            if gif_results:
+                pick = random.choice(gif_results)
                 try:
                     await msg.answer_animation(pick["file_id"])
-                    await send_smart(msg, random.choice(["на", "держи", "вот нашла", "хз подойдёт"]))
+                    await send_smart(msg, random.choice(["на", "держи", "вот", "хз подойдёт"]))
                 except Exception as e:
                     log.warning("gif send fail: %s", e)
-                    await send_smart(msg, "не нашла ничего нормального")
+                    await send_smart(msg, "чото сломалось")
             else:
                 await send_smart(msg, random.choice([
                     "у меня пока нет гифок — скинь мне какую-нибудь я запомню",
-                    "гифок нет ещё, кидай мне — буду собирать",
+                    "гифок не накопила ещё, кидай мне — буду собирать",
+                    "нет пока нормальных гифок у меня"
                 ]))
             return
 
@@ -2716,15 +2875,20 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
         reply_ctx = ""
         if msg.reply_to_message:
             rt = msg.reply_to_message
-            # берём текст или caption того сообщения
             rt_text = rt.text or rt.caption or ""
             if rt_text:
-                # определяем чьё это было сообщение
                 if rt.from_user and rt.from_user.id == (await msg.bot.get_me()).id:
                     reply_ctx = f"[юзер отвечает на ТВОЁ сообщение: «{rt_text[:400]}»]"
                 else:
                     reply_ctx = f"[юзер отвечает на сообщение: «{rt_text[:400]}»]"
-        answer = await ai_chat(aiohttp_session, u, text, reply_context=reply_ctx)
+
+        # если спрашивают про Reverse 1999 — подгружаем актуальную инфу из веба
+        reverse_ctx = ""
+        if re.search(r"(?i)(reverse|реверс|баннер|персон|1999|изольд|арканист|психуб|мета|тир)", text):
+            reverse_ctx = await _fetch_reverse_news(aiohttp_session, text)
+
+        full_ctx = "\n\n".join(x for x in [reply_ctx, reverse_ctx] if x)
+        answer = await ai_chat(aiohttp_session, u, text, reply_context=full_ctx)
         stop.set()
         answer = await maybe_send_sticker(msg, answer)
         await send_smart(msg, answer)
