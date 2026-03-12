@@ -476,7 +476,7 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 "бля а прикинь он признаётся и ты ему высираешь максимально обидный текст"
 "начни вести бьюти блог пиши брендам и они тебе будут отправлять косметику"
 "хуевый стонкс мне тик ток уже который год обещает платить 0,02$ в месяц где мои деньги"
-"урааааааааааааааааааааааааааааааааааааааааааааааааааааааааааааааааааа" (с рандомной длиной)
+"урааааааааааааааааааааааааааааааааааааааааааааааааааааааааааааааааааааа" (с рандомной длиной)
 
 примеры НЕПРАВИЛЬНО:
 "Привет! Как дела? Я рада тебя видеть!"  ← заглавные, восклицания как робот
@@ -737,6 +737,7 @@ def _murkaify(text: str) -> str:
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ENGINE — SmartRotation + OR fallback на llama-3.3-70b
+# ФИКС: убрана задержка из-под лока, правильная логика OR-fallback
 # ══════════════════════════════════════════════════════════════════════════════
 TIMEOUT_G  = aiohttp.ClientTimeout(total=90)
 TIMEOUT_OR = aiohttp.ClientTimeout(total=60)
@@ -754,6 +755,9 @@ _fb_i = 0
 def _fallback() -> str:
     global _fb_i
     r = _ALIVE_FALLBACKS[_fb_i % len(_ALIVE_FALLBACKS)]; _fb_i += 1; return r
+
+# Sentinel — означает что Gemini реально недоступен и нужен OR fallback
+_GEMINI_UNAVAILABLE = "\x00__GEMINI_UNAVAILABLE__\x00"
 
 
 def _to_gemini(messages: list) -> tuple:
@@ -783,18 +787,23 @@ def _to_gemini(messages: list) -> tuple:
 
 async def _gemini_post(session: aiohttp.ClientSession,
                        messages: list, model: str) -> str:
+    """
+    ФИКС: задержка вынесена ИЗ-ПОД лока — лок только для rate-limit контроля,
+    не блокирует параллельные запросы на время sleep'а.
+    """
     global _gemini_lock, _gemini_last_request
     if _gemini_lock is None:
         _gemini_lock = asyncio.Lock()
 
-    # rate-limit + случайная задержка перед запросом (SmartRotation anti-ban)
+    # Случайная задержка ПЕРЕД локом — не блокирует других
+    await asyncio.sleep(random.uniform(0.3, 1.0))
+
+    # Лок только для проверки/обновления таймштампа (очень быстро)
     async with _gemini_lock:
         now = time.monotonic()
-        wait = 0.2 - (now - _gemini_last_request)
+        wait = 0.1 - (now - _gemini_last_request)
         if wait > 0:
             await asyncio.sleep(wait)
-        # случайная задержка 1-2.5с перед каждым запросом к API
-        await asyncio.sleep(random.uniform(1.0, 2.5))
         _gemini_last_request = time.monotonic()
 
     return await _gemini_post_inner(session, messages, model)
@@ -833,8 +842,9 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
         wait = end - time.monotonic()
         if wait >= 600:  # 10+ минут — сразу OR
             log.warning("Все Gemini ключи на бане (%.0fс), переход на OR llama", wait)
-            return ""  # пустая строка → caller сделает OR fallback
-        await asyncio.sleep(min(wait + 1.0, 30))  # ждём не дольше 30с
+            return _GEMINI_UNAVAILABLE
+        if wait > 0:
+            await asyncio.sleep(min(wait + 1.0, 30))
 
     while switched <= max_key_switches:
         idx, key = _keys.pick_best()
@@ -848,7 +858,7 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
                 idx, key = _keys.pick_best()
             if idx == -1 or not key:
                 log.warning("Все Gemini ключи на кулдауне, переход на OR")
-                return ""  # OR fallback
+                return _GEMINI_UNAVAILABLE
 
         if _keys._is_banned(idx):
             _keys._idx = (idx + 1) % len(_keys._pool)
@@ -866,13 +876,18 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
                     cands = data.get("candidates", [])
                     if not cands:
                         log.warning("Gemini 200 пустые candidates ключ #%d", idx)
+                        # Пустые candidates — это проблема фильтра/контента, не ключа
+                        # Возвращаем fallback, НЕ уходим в OR (ключ рабочий)
+                        _keys.mark_used(idx)
                         return _fallback()
                     try:
                         text = cands[0]["content"]["parts"][0]["text"]
                     except (KeyError, IndexError) as e:
                         finish = cands[0].get("finishReason", "?")
                         log.warning("Gemini 200 нет текста ключ #%d finishReason=%s err=%s", idx, finish, e)
-                        return ""  # OR fallback
+                        # finishReason может быть SAFETY или MAX_TOKENS — не OR fallback
+                        _keys.mark_used(idx)
+                        return _fallback()
                     _keys.mark_used(idx)
                     return text
 
@@ -923,7 +938,7 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
             continue
 
     log.warning("Gemini: исчерпаны попытки (switched=%d), переход на OR", switched)
-    return ""  # OR fallback
+    return _GEMINI_UNAVAILABLE
 
 
 _OR_NO_SYSTEM_ROLE: set[str] = {
@@ -953,9 +968,7 @@ def _or_merge_system(messages: list, model: str) -> list:
 
 
 async def _or_post(session: aiohttp.ClientSession, payload: dict) -> str:
-    """POST к OpenRouter. Совместим с OpenAI API.
-    При Gemini-недоступности использует meta-llama/llama-3.3-70b:free как fallback.
-    """
+    """POST к OpenRouter. Совместим с OpenAI API."""
     model = payload.get("model", Secrets.MODEL_FALLBACK_OR)
     msgs  = _or_merge_system(payload["messages"], model)
 
@@ -971,8 +984,7 @@ async def _or_post(session: aiohttp.ClientSession, payload: dict) -> str:
         "max_tokens":  payload.get("max_tokens", 500),
         "temperature": payload.get("temperature", 0.9),
     }
-    # случайная задержка перед запросом к OR тоже
-    await asyncio.sleep(random.uniform(1.0, 2.5))
+    await asyncio.sleep(random.uniform(0.3, 1.0))
     try:
         async with session.post(
             Secrets.OPENROUTER_URL, json=clean_payload,
@@ -1021,35 +1033,42 @@ def _or_inc():
 
 
 async def _post(session: aiohttp.ClientSession, payload: dict) -> str:
-    """Основной роутер: Gemini → OR llama-3.3-70b fallback"""
+    """
+    Основной роутер: Gemini → OR llama-3.3-70b fallback.
+    ФИКС: OR используется только при _GEMINI_UNAVAILABLE, не при обычных fallback-фразах.
+    """
     if "gemini" in payload.get("model", "").lower():
         result = await _gemini_post(session, payload["messages"], payload["model"])
 
-        # Пустая строка или fallback — переходим на OR
-        if (not result or result in _FALLBACKS) and Secrets.OPENROUTER_KEY and _or_available():
-            log.info("Gemini недоступен → OR llama-3.3-70b (%d/%d)", _or_daily_count, _OR_DAILY_LIMIT)
-            or_msgs = []
-            for m in payload["messages"]:
-                if m["role"] == "system":
-                    c = m["content"]
-                    or_msgs.append({"role": "system", "content": c[-2000:] if len(c) > 2000 else c})
-                elif isinstance(m.get("content"), list):
-                    pass  # мультимодал — OR не поддерживает
-                else:
-                    or_msgs.append(m)
-            system_msgs = [m for m in or_msgs if m["role"] == "system"]
-            other_msgs  = [m for m in or_msgs if m["role"] != "system"][-6:]
-            or_payload  = {
-                **payload,
-                "model": Secrets.MODEL_FALLBACK_OR,
-                "messages": system_msgs + other_msgs,
-                "max_tokens": 500,
-            }
-            _or_inc()
-            or_result = await _or_post(session, or_payload)
-            if or_result and or_result not in _FALLBACKS:
-                return or_result
-        return result or _fallback()
+        # OR нужен ТОЛЬКО если Gemini реально недоступен (все ключи забанены/ошибки сети)
+        # _GEMINI_UNAVAILABLE — специальный sentinel для этого случая
+        if result == _GEMINI_UNAVAILABLE:
+            if Secrets.OPENROUTER_KEY and _or_available():
+                log.info("Gemini недоступен → OR llama-3.3-70b (%d/%d)", _or_daily_count, _OR_DAILY_LIMIT)
+                or_msgs = []
+                for m in payload["messages"]:
+                    if m["role"] == "system":
+                        c = m["content"]
+                        or_msgs.append({"role": "system", "content": c[-2000:] if len(c) > 2000 else c})
+                    elif isinstance(m.get("content"), list):
+                        pass  # мультимодал — OR не поддерживает
+                    else:
+                        or_msgs.append(m)
+                system_msgs = [m for m in or_msgs if m["role"] == "system"]
+                other_msgs  = [m for m in or_msgs if m["role"] != "system"][-6:]
+                or_payload  = {
+                    **payload,
+                    "model": Secrets.MODEL_FALLBACK_OR,
+                    "messages": system_msgs + other_msgs,
+                    "max_tokens": 500,
+                }
+                _or_inc()
+                or_result = await _or_post(session, or_payload)
+                if or_result and or_result not in _FALLBACKS:
+                    return or_result
+            return _fallback()
+
+        return result
 
     if _or_available():
         _or_inc()
@@ -1123,10 +1142,7 @@ async def _extract_audio_from_video(video_bytes: bytes) -> bytes | None:
 
 async def ai_transcribe(session: aiohttp.ClientSession,
                         audio_bytes: bytes, filename: str = "voice.ogg") -> str:
-    """Транскрибирует аудио/видео через Gemini (нативная поддержка аудио).
-    Для mp4/кружков — сначала пробуем вытащить аудио, потом шлём как есть.
-    Пробует flash → flash-lite с ротацией ключей.
-    """
+    """Транскрибирует аудио/видео через Gemini (нативная поддержка аудио)."""
     fmt = Path(filename).suffix.lstrip(".").lower() or "ogg"
 
     # для видео (кружок) — вытащить аудио
@@ -1159,12 +1175,10 @@ async def ai_transcribe(session: aiohttp.ClientSession,
                  "Только текст, без пояснений и без временных меток."},
     ]}], "safetySettings": safety}
 
-    # пробуем flash (поддерживает аудио), потом flash-lite
     models_to_try = [
-        Secrets.MODEL_VISION.split("/")[-1],   # gemini-2.5-flash
-        Secrets.MODEL_CHAT.split("/")[-1],     # gemini-2.5-flash-lite
+        Secrets.MODEL_VISION.split("/")[-1],
+        Secrets.MODEL_CHAT.split("/")[-1],
     ]
-    # убираем дубли
     seen: list[str] = []
     for m in models_to_try:
         if m not in seen:
@@ -1178,7 +1192,7 @@ async def ai_transcribe(session: aiohttp.ClientSession,
         try:
             url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
                    f"{model_name}:generateContent?key={key}")
-            await asyncio.sleep(random.uniform(0.5, 1.5))
+            await asyncio.sleep(random.uniform(0.3, 1.0))
             async with session.post(url, json=body,
                                     timeout=aiohttp.ClientTimeout(total=60)) as r:
                 if r.status == 200:
@@ -1207,7 +1221,6 @@ async def ai_draw(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
     if not clean:
         return None
 
-    # Переводим на английский для лучшего результата
     try:
         en_prompt = await ai_translate_to_en(session, clean)
     except Exception:
@@ -1255,7 +1268,7 @@ async def ai_translate_to_en(session: aiohttp.ClientSession, text: str) -> str:
             {"role": "user", "content":
              f"Translate to English for image generation prompt, only translation no explanations: {text[:200]}"}
         ], Secrets.MODEL_CHAT)
-        if result and result not in _FALLBACKS and len(result.strip()) < 300:
+        if result and result not in _FALLBACKS and result != _GEMINI_UNAVAILABLE and len(result.strip()) < 300:
             return result.strip()
     except Exception:
         pass
@@ -1296,6 +1309,8 @@ async def ai_detect_trick(
     ], Secrets.MODEL_CHAT)
     _bad_tricks = set(_FALLBACKS) | {"нет", "no", "none", "да", "нет.", "да."}
     cleaned_trick = (result or "").strip()
+    if cleaned_trick == _GEMINI_UNAVAILABLE:
+        return
     is_real_trick = (
         cleaned_trick
         and cleaned_trick.upper() not in ("НЕТ", "ДА", "НЕТ.", "ДА.", "NO", "YES")
@@ -1384,7 +1399,7 @@ async def _rvc_audio_from_result(session: aiohttp.ClientSession,
 
 
 async def rvc_synthesize(session: aiohttp.ClientSession, text: str) -> bytes | None:
-    """TTS через Applio. Если недоступен — возвращает None (caller покажет сообщение)."""
+    """TTS через Applio. Если недоступен — возвращает None."""
     base = "https://wqyuetasdasd-murka-rvc-inference.hf.space"
     tts_voice = "ru-RU-SvetlanaNeural"
     model_name = "mashimahimeko_act2_775e_34"
@@ -1554,14 +1569,15 @@ async def analyze_sticker_img(session, img_b64: str, mt: str = "image/webp") -> 
         ]},
     ], Secrets.MODEL_VISION)
     desc, emo, text_on_img, keys = "стикер", "funny", "", ""
-    for line in raw.split("\n"):
-        if line.startswith("DESC:"): desc = line[5:].strip()
-        elif line.startswith("EMO:"): emo  = line[4:].strip().lower()
-        elif line.startswith("KEYS:"): keys = line[5:].strip().lower()
-        elif line.startswith("TEXT:"):
-            t = line[5:].strip()
-            if t.lower() not in ("нет", "no", "none", "-", ""):
-                text_on_img = t
+    if raw and raw != _GEMINI_UNAVAILABLE:
+        for line in raw.split("\n"):
+            if line.startswith("DESC:"): desc = line[5:].strip()
+            elif line.startswith("EMO:"): emo  = line[4:].strip().lower()
+            elif line.startswith("KEYS:"): keys = line[5:].strip().lower()
+            elif line.startswith("TEXT:"):
+                t = line[5:].strip()
+                if t.lower() not in ("нет", "no", "none", "-", ""):
+                    text_on_img = t
     if text_on_img:
         desc = f"{desc}. текст на изображении: «{text_on_img}»"
         keys = (keys + "," + text_on_img.lower()).strip(",")
@@ -1616,7 +1632,7 @@ async def maybe_send_sticker(msg: Message, answer: str,
 
 
 async def maybe_force_sticker(msg: Message, uid_str: str):
-    pass  # отключено — источник спама стикерами
+    pass  # отключено
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1887,7 +1903,7 @@ async def cmd_keystatus(msg: Message):
             if rem > 3600:
                 banned_long.append((i, rem))
             elif rem > 600:
-                banned_short.append((i, rem))  # RPM 10-мин бан
+                banned_short.append((i, rem))
             else:
                 banned_short.append((i, rem))
         else:
@@ -2238,7 +2254,7 @@ async def on_document(msg: Message, aiohttp_session: aiohttp.ClientSession):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STICKER HANDLER — v2: учитывает emoji и set_name для контекста
+# STICKER HANDLER
 # ══════════════════════════════════════════════════════════════════════════════
 @dp.message(F.sticker)
 async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
@@ -2249,14 +2265,12 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
     stop    = asyncio.Event()
     asyncio.create_task(_typing_loop(msg.chat.id, stop))
 
-    # Собираем контекст стикера: emoji + название пака
     sticker_emoji    = sticker.emoji or ""
     sticker_set_name = getattr(sticker, "set_name", "") or ""
     sticker_context  = ""
     if sticker_emoji:
         sticker_context += f"эмодзи стикера: {sticker_emoji}. "
     if sticker_set_name:
-        # Название пака часто описательное — передаём как контекст
         sticker_context += f"пак стикеров: {sticker_set_name}. "
 
     try:
@@ -2283,7 +2297,6 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
         img_b64 = base64.b64encode(raw).decode()
         info    = await analyze_sticker_img(aiohttp_session, img_b64, "image/webp")
 
-        # Дополняем описание инфой из стикера
         if sticker_emoji:
             info["keywords"] = (info.get("keywords", "") + "," + sticker_emoji).strip(",")
         if sticker_set_name:
@@ -2322,7 +2335,7 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# GIF / ANIMATION HANDLER — улучшенная обработка через Gemini Vision
+# GIF / ANIMATION HANDLER
 # ══════════════════════════════════════════════════════════════════════════════
 async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
                         file_id: str, thumb_file_id: str | None, caption: str,
@@ -2334,7 +2347,6 @@ async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
     asyncio.create_task(_typing_loop(msg.chat.id, stop))
     img_b64 = None
 
-    # 1) thumbnail — самый быстрый
     if thumb_file_id:
         try:
             raw = await dl(thumb_file_id)
@@ -2343,7 +2355,6 @@ async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
         except Exception as e:
             log.warning("gif thumbnail fail: %s", e)
 
-    # 2) ffmpeg кадр из видео
     if not img_b64 and (file_size == 0 or file_size < 20_000_000):
         try:
             raw   = await dl(file_id)
@@ -2363,7 +2374,6 @@ async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
             log.warning("gif reply fail: %s", ex)
 
     if img_b64:
-        # Передаём в Gemini Vision для полноценного описания
         info = await analyze_sticker_img(aiohttp_session, img_b64, "image/jpeg")
         mem.save_sticker(file_id, "gif", info["description"], info["emotion"], u,
                          info.get("keywords", ""))
@@ -2411,7 +2421,6 @@ async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
 
 @dp.message(F.animation)
 async def on_gif(msg: Message, aiohttp_session: aiohttp.ClientSession):
-    """Нативные TG гифки (mp4 без звука) через F.animation."""
     anim = msg.animation
     thumb_fid = anim.thumbnail.file_id if anim.thumbnail else None
     await _process_gif(msg, aiohttp_session, anim.file_id, thumb_fid,
@@ -2495,12 +2504,9 @@ async def _web_search_ctx(session: aiohttp.ClientSession, query: str) -> str:
     from urllib.parse import quote
     encoded = quote(query[:100])
 
-    # Пробуем несколько источников
     sources = [
-        # DuckDuckGo JSON API (не банит)
         (f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&skip_disambig=1",
          "ddg_json"),
-        # DuckDuckGo HTML (запасной)
         (f"https://duckduckgo.com/html/?q={encoded}&kl=ru-ru",
          "ddg_html"),
     ]
@@ -2520,11 +2526,9 @@ async def _web_search_ctx(session: aiohttp.ClientSession, query: str) -> str:
                     except Exception:
                         continue
                     snippets = []
-                    # AbstractText — краткое описание
                     abstract = data.get("AbstractText", "").strip()
                     if abstract and len(abstract) > 30:
                         snippets.append(abstract[:400])
-                    # RelatedTopics
                     for topic in data.get("RelatedTopics", [])[:4]:
                         text_chunk = topic.get("Text", "") if isinstance(topic, dict) else ""
                         text_chunk = re.sub(r"<[^>]+>", "", text_chunk).strip()
@@ -2536,7 +2540,7 @@ async def _web_search_ctx(session: aiohttp.ClientSession, query: str) -> str:
                         log.info("web_search DDG JSON ok: %d chars", len(result))
                         return result
 
-                else:  # html
+                else:
                     html_text = await r.text()
                     snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</(?:a|span)>',
                                           html_text, re.DOTALL)
@@ -2560,11 +2564,8 @@ async def _web_search_ctx(session: aiohttp.ClientSession, query: str) -> str:
 
 async def search_and_send_pic(msg: Message, query: str,
                               session: aiohttp.ClientSession) -> bool:
-    """Ищет/генерирует картинку через Pollinations и отправляет."""
     from urllib.parse import quote
-    # переводим запрос на английский для лучшего результата
     try:
-        from urllib.parse import quote as _q
         en_query = await ai_translate_to_en(session, query)
     except Exception:
         en_query = query
@@ -2575,10 +2576,10 @@ async def search_and_send_pic(msg: Message, query: str,
         f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512&nologo=true&nofeed=true&model=turbo&seed={seed}",
     ]
     _IMAGE_MAGIC = (
-        b'\xff\xd8\xff',  # JPEG
-        b'\x89PNG',       # PNG
-        b'GIF8',          # GIF
-        b'RIFF',          # WEBP
+        b'\xff\xd8\xff',
+        b'\x89PNG',
+        b'GIF8',
+        b'RIFF',
     )
     for url in urls:
         try:
@@ -2663,7 +2664,6 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
                 try: await status.delete()
                 except Exception: pass
             if not audio:
-                # RVC лежит — пробуем edge-tts как fallback
                 log.info("RVC недоступен, пробуем edge-tts fallback")
                 audio = await edge_tts_synthesize(text)
             if audio:
@@ -2776,25 +2776,20 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
                 else:
                     reply_ctx = f"[юзер отвечает на сообщение: «{rt_text[:400]}»]"
 
-        # веб-поиск для актуальных вопросов, фактов, Reverse 1999
+        # веб-поиск для актуальных вопросов
         web_ctx = ""
         _search_rx = re.compile(
             r"(?i)("
-            # игры / аниме
             r"reverse|реверс|баннер|1999|изольд|арканист|психуб|мета|тир|дота|"
-            # актуальность / новости
             r"новост|актуальн|вышел|вышла|вышли|обновлени|патч|релиз|"
             r"сегодня|сейчас|недавно|в этом году|в 2024|в 2025|"
-            # факты / информация
             r"кто такой|что такое|расскажи про|что знаешь про|"
             r"кто написал|кто создал|когда вышел|история |"
             r"объясни|как работает|почему |зачем |"
-            # цены / курсы / рейтинги
             r"скольк|курс|цена|стоит|топ |лучш|рейтинг|"
             r"сравни|versus|vs |против "
             r")"
         )
-        # НЕ искать если вопрос про мурку саму
         _no_search_rx = re.compile(r"(?i)(ты|мурка|себя|тебя|ии|нейро|бот|модел)")
         if _search_rx.search(text) and not _no_search_rx.search(text[:30]):
             web_ctx = await _web_search_ctx(aiohttp_session, text)
