@@ -906,25 +906,6 @@ def _murkaify(text: str) -> str:
     for p in ai_phrases:
         text = re.sub(p, "", text)
 
-    # если ответ длиннее ~200 символов и нет переносов строк —
-    # разбиваем на абзацы по союзам/паузам чтобы выглядело как несколько сообщений
-    if len(text) > 200 and text.count("\n") < 2:
-        # разбиваем после завершённых предложений (. ! ?) длиннее 60 символов
-        parts = re.split(r"(?<=[.!?])\s+(?=[А-ЯЁA-Z а-яёa-z])", text)
-        if len(parts) > 1:
-            # группируем в куски по ~100-180 символов
-            chunks, cur = [], ""
-            for p in parts:
-                if cur and len(cur) + len(p) > 160:
-                    chunks.append(cur.strip())
-                    cur = p
-                else:
-                    cur = (cur + " " + p).strip() if cur else p
-            if cur:
-                chunks.append(cur.strip())
-            if len(chunks) > 1:
-                text = "\n\n".join(chunks)
-
     text = _decapitalize(text)
     return text.strip()
 
