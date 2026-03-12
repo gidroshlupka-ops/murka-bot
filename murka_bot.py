@@ -38,8 +38,11 @@ class Secrets:
         "https://image.pollinations.ai/prompt/{prompt}"
         "?width=1024&height=1024&nologo=true&enhance=true&model=flux"
     )
-    MODEL_CHAT:    str = "google/gemini-2.0-flash"  # 1500 RPD free vs ~20 у 2.5-flash-lite
-    MODEL_VISION:  str = "google/gemini-2.5-flash-lite"
+    # gemini-2.0-flash DEPRECATED → retire June 1 2026, мигрируем на 2.5
+    # gemini-2.5-flash-lite: 15 RPM, 1000 RPD (лучшие лимиты для чата)
+    # gemini-2.5-flash:      10 RPM,  500 RPD (лучше для vision/сложных задач)
+    MODEL_CHAT:    str = "google/gemini-2.5-flash-lite"
+    MODEL_VISION:  str = "google/gemini-2.5-flash"
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
     MODEL_LLAMA:   str = "openrouter/free"  # авто-роутер: выбирает любую доступную бесплатную модель
 
@@ -94,23 +97,34 @@ class KeyManager:
                 until_ts REAL NOT NULL)""")
 
     def _load_bans(self):
-        """Загружаем баны из БД. Просроченные — игнорируем."""
+        """Загружаем баны из БД. Просроченные — игнорируем и удаляем."""
         import sqlite3 as _sq
         now = time.monotonic()
-        # monotonic не переживает рестарт — конвертируем через wall clock
         wall_now = time.time()
         mono_now = now
         try:
             with _sq.connect(self._BAN_DB) as c:
                 rows = c.execute("SELECT idx, until_ts FROM bans").fetchall()
             loaded = 0
+            expired_idxs = []
             for idx, until_wall in rows:
                 remaining = until_wall - wall_now
                 if remaining > 0:
                     self._cooldown[idx] = mono_now + remaining
                     loaded += 1
+                    log.info("KeyManager: бан ключ #%d ещё активен %.0fс", idx, remaining)
+                else:
+                    expired_idxs.append(idx)
+            if expired_idxs:
+                # Чистим протухшие баны из БД чтобы они не накапливались
+                with _sq.connect(self._BAN_DB) as c:
+                    c.executemany("DELETE FROM bans WHERE idx=?",
+                                  [(i,) for i in expired_idxs])
+                log.info("KeyManager: удалено %d протухших банов из БД", len(expired_idxs))
             if loaded:
                 log.info("KeyManager: загружено %d активных банов из БД", loaded)
+            else:
+                log.info("KeyManager: все ключи свободны (нет активных банов в БД)")
         except Exception as e:
             log.warning("KeyManager: не смог загрузить баны: %s", e)
 
@@ -213,7 +227,6 @@ class KeyManager:
 _keys = KeyManager(Secrets.GEMINI_POOL)
 # Семафор — не более 3 параллельных запросов к Gemini
 # Без него при старте 10+ сообщений прилетают одновременно и сжигают все ключи
-_gemini_sem: asyncio.Semaphore | None = None  # инициализируется лениво
 _gemini_last_request: float = 0.0             # время последнего запроса
 _gemini_lock = None                           # asyncio.Lock, инициализируется лениво
 
@@ -248,7 +261,7 @@ def detect_gender(text: str) -> str | None:
 # MEMORY
 # ══════════════════════════════════════════════════════════════════════════════
 class Memory:
-    HISTORY_LIMIT = 40
+    HISTORY_LIMIT = 24  # 40 было слишком много → большой промт → медленные ответы
 
     def __init__(self):
         self._db = "murka_memory.db"
@@ -737,26 +750,23 @@ def _to_gemini(messages: list) -> tuple:
 
 async def _gemini_post(session: aiohttp.ClientSession,
                        messages: list, model: str) -> str:
-    global _gemini_sem, _gemini_lock, _gemini_last_request
+    global _gemini_lock, _gemini_last_request
     # Ленивая инициализация asyncio-примитивов (нужен живой event loop)
     if _gemini_lock is None:
         _gemini_lock = asyncio.Lock()
-    if _gemini_sem is None:
-        # 3 параллельных запроса: при 3 пользователях это адекватно,
-        # при этом не сжигаем все ключи за один "шторм" сообщений
-        _gemini_sem = asyncio.Semaphore(3)
 
-    async with _gemini_sem:
-        # Глобальный rate-limit: минимум 1 с между запросами (суммарно по всем ключам).
-        # Это единственный реальный ограничитель частоты — MIN_INTERVAL в KeyManager убран,
-        # чтобы не приводил к ложной "занятости" ключей.
-        async with _gemini_lock:
-            now  = time.monotonic()
-            wait = 1.0 - (now - _gemini_last_request)
-            if wait > 0:
-                await asyncio.sleep(wait)
-            _gemini_last_request = time.monotonic()
-        return await _gemini_post_inner(session, messages, model)
+    # Rate-limit: 0.2с между запросами (30 ключей — нет смысла в 1с задержке).
+    # ВАЖНО: lock держится ТОЛЬКО пока обновляем timestamp — НЕ на время HTTP-запроса.
+    # Баг v8: Semaphore(3) держался на весь HTTP-запрос (таймаут 90с).
+    # При 3+ одновременных пользователях следующие запросы ждали ВСЕЙ очереди — отсюда 4+ минуты.
+    async with _gemini_lock:
+        now = time.monotonic()
+        wait = 0.2 - (now - _gemini_last_request)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _gemini_last_request = time.monotonic()
+
+    return await _gemini_post_inner(session, messages, model)
 
 
 async def _gemini_post_inner(session: aiohttp.ClientSession,
@@ -767,8 +777,8 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
     body = {
         "contents": gem_msgs,
         "generationConfig": {
-            "maxOutputTokens": 2048, "temperature": 1.5,
-            "topP": 0.95, "topK": 64,
+            "maxOutputTokens": 600, "temperature": 0.9,
+            "topP": 0.95, "topK": 40,
         },
     }
     if system_text:
@@ -782,12 +792,16 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
     switched = 0
     local_attempt = 0  # попыток с текущим ключом
 
-    # Быстрая проверка до любых HTTP запросов:
-    # если pick_best() сразу возвращает -1 — все ключи забанены, идём в фолбек мгновенно
+    # Быстрая проверка до цикла — если все ключи на ДОЛГОМ бане (> 70с), сразу fallback.
+    # Если кулдаун короткий (RPM 65с) — НЕ выходим сразу, пусть цикл сам подождёт.
     idx, key = _keys.pick_best()
     if idx == -1 or not key:
-        log.warning("Все Gemini ключи забанены, сразу фолбек (без HTTP)")
-        return _fallback()
+        end = _keys.next_cooldown_end()
+        wait = end - time.monotonic()
+        if wait >= 70:
+            log.warning("Все Gemini ключи на долгом бане (%.0fс), сразу фолбек", wait)
+            return _fallback()
+        # иначе — короткий RPM кулдаун, цикл подождёт
 
     while switched <= max_key_switches:
         idx, key = _keys.pick_best()
@@ -818,8 +832,22 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
+                    # Gemini может вернуть 200 но с пустыми candidates (safety block / OTHER)
+                    cands = data.get("candidates", [])
+                    if not cands:
+                        log.warning("Gemini 200 но пустые candidates ключ #%d | promptFeedback: %s",
+                                    idx, data.get("promptFeedback", ""))
+                        # не баним ключ — это проблема запроса, не ключа
+                        return _fallback()
+                    try:
+                        text = cands[0]["content"]["parts"][0]["text"]
+                    except (KeyError, IndexError) as e:
+                        finish = cands[0].get("finishReason", "?")
+                        log.warning("Gemini 200 но нет текста ключ #%d finishReason=%s err=%s",
+                                    idx, finish, e)
+                        return _fallback()
                     _keys.mark_used(idx)
-                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                    return text
 
                 # --- читаем тело ответа для диагностики ---
                 err_body = await resp.text()
@@ -847,10 +875,16 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
                     await asyncio.sleep(2)
                     continue
 
-                # 400 / 403 / другой клиентский код — не ротируем ключ,
-                # это скорее всего проблема запроса, а не ключа
-                log.error("Gemini клиентская ошибка %d, прекращаю попытки", resp.status)
-                return _fallback()
+                # 400 / 403 — ключ невалидный или запрос плохой.
+                # Баним ключ на 1ч и ротируем — иначе следующий запрос снова
+                # попадёт на него и снова получит 400 → вечный fallback.
+                log.error("Gemini %d ключ #%d — баним на 1ч и ротируем", resp.status, idx)
+                self_ban_dur = 3600.0
+                _keys._cooldown[idx] = time.monotonic() + self_ban_dur
+                _keys._save_ban(idx, self_ban_dur)
+                _keys._idx = (idx + 1) % len(_keys._pool)
+                switched += 1
+                continue
 
         except asyncio.TimeoutError:
             log.warning("Gemini timeout ключ #%d", idx)
@@ -1696,6 +1730,36 @@ async def cmd_memory(msg: Message):
         await msg.answer(f"{base}\n\nзадоксила:\n{lines}")
 
 
+@dp.message(Command("keystatus"))
+async def cmd_keystatus(msg: Message):
+    """Диагностика: состояние пула Gemini-ключей."""
+    now = time.monotonic()
+    n = len(_keys._pool)
+    banned_short, banned_long, free = [], [], []
+    for i in range(n):
+        until = _keys._cooldown.get(i, 0)
+        if until > now:
+            rem = until - now
+            if rem > 3600:
+                banned_long.append((i, rem))  # 400-бан (невалидный ключ)
+            else:
+                banned_short.append((i, rem))  # RPM-бан
+        else:
+            free.append(i)
+    lines = [f"🔑 Gemini пул: {n} ключей"]
+    lines.append(f"✅ Свободных: {len(free)}")
+    if banned_short:
+        lines.append(f"⏳ RPM-кулдаун ({len(banned_short)} шт): " +
+                     ", ".join(f"#{i}({r:.0f}с)" for i, r in banned_short[:10]))
+    if banned_long:
+        lines.append(f"🚫 Невалидные/400-бан ({len(banned_long)} шт): " +
+                     ", ".join(f"#{i}({r/3600:.1f}ч)" for i, r in banned_long))
+    lines.append(f"📍 Текущий idx: {_keys._idx % max(n, 1)}")
+    if not Secrets.OPENROUTER_KEY:
+        lines.append("⚠️ OR: ключ не задан")
+    else:
+        lines.append("✅ OR: ключ задан")
+    await msg.answer("\n".join(lines))
 @dp.message(Command("draw"))
 async def cmd_draw(msg: Message):
     u = uid(msg)
@@ -2337,7 +2401,10 @@ class SessionMiddleware(BaseMiddleware):
 
 
 class AccessMiddleware(BaseMiddleware):
-    """Проверяет доступ по chat_id. Без ключей, без задержек для разрешённых."""
+    """Проверяет доступ по chat_id.
+    Регистрируется как outer_middleware → event это Update, не Message.
+    Поэтому chat_id берём из event.message / event.callback_query и т.д.
+    """
     async def __call__(
         self,
         handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
@@ -2346,26 +2413,40 @@ class AccessMiddleware(BaseMiddleware):
     ) -> Any:
         if not Secrets.ALLOWED_IDS:
             return await handler(event, data)
-        msg = data.get("event_update", {})
-        # получаем chat_id из любого типа события
-        chat_id = None
-        if hasattr(event, "chat") and event.chat:
-            chat_id = event.chat.id
-        elif hasattr(event, "message") and event.message:
+
+        # event здесь — aiogram Update. chat_id достаём из вложенного объекта.
+        chat_id: int | None = None
+        inner_msg: Message | None = None
+        # Message (обычное сообщение)
+        if hasattr(event, "message") and event.message:
             chat_id = event.message.chat.id
+            inner_msg = event.message
+        # callback_query (кнопки)
+        elif hasattr(event, "callback_query") and event.callback_query:
+            chat_id = event.callback_query.message.chat.id if event.callback_query.message else None
+        # inline_query
+        elif hasattr(event, "inline_query") and event.inline_query:
+            chat_id = event.inline_query.from_user.id
+
         if chat_id is None:
+            # неизвестный тип апдейта — пропускаем
             return await handler(event, data)
+
         # в чёрном списке — молчим полностью
         if chat_id in _BLACKLIST:
             return
-        # не в списке разрешённых — добавляем в чёрный список и один раз отвечаем
+
+        # не в списке разрешённых — баним и один раз отвечаем
         if chat_id not in Secrets.ALLOWED_IDS:
             _BLACKLIST.add(chat_id)
             log.warning("Заблокирован chat_id=%d", chat_id)
-            if isinstance(event, Message):
-                try: await event.answer("нет доступа")
-                except Exception: pass
+            if inner_msg is not None:
+                try:
+                    await inner_msg.answer("нет доступа")
+                except Exception:
+                    pass
             return
+
         return await handler(event, data)
 
 
@@ -2382,12 +2463,13 @@ async def main():
 
     # регистрируем команды в меню бота
     await bot.set_my_commands([
-        BotCommand(command="draw",   description="нарисовать что-нибудь"),
-        BotCommand(command="voice",  description="озвучить текст голосом мурки"),
-        BotCommand(command="music",  description="спеть песню голосом мурки"),
-        BotCommand(command="forget", description="сбросить память"),
-        BotCommand(command="memory", description="что я о тебе знаю"),
-        BotCommand(command="help",   description="помощь"),
+        BotCommand(command="draw",      description="нарисовать что-нибудь"),
+        BotCommand(command="voice",     description="озвучить текст голосом мурки"),
+        BotCommand(command="music",     description="спеть песню голосом мурки"),
+        BotCommand(command="forget",    description="сбросить память"),
+        BotCommand(command="memory",    description="что я о тебе знаю"),
+        BotCommand(command="help",      description="помощь"),
+        BotCommand(command="keystatus", description="статус ключей gemini (для отладки)"),
     ], scope=BotCommandScopeDefault())
 
     async with aiohttp.ClientSession() as session:
