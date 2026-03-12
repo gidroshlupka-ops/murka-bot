@@ -145,9 +145,18 @@ class KeyManager:
 
     def ban_429(self, idx: int, err_body: str = ""):
         """Вызывается ТОЛЬКО при HTTP 429 от Google.
-        Если лимит дневной (RPD) — баним на 24 ч, иначе на COOLDOWN (65 с).
+        RPD (дневной лимит): баним на 24ч.
+        RPM (минутный лимит): баним на 65с.
+        Детектируем по наличию "free_tier_requests" или "per_day" в теле ошибки.
         """
-        if "free_tier" in err_body or "day" in err_body.lower():
+        body_l = err_body.lower()
+        is_rpd = (
+            "free_tier_requests" in body_l      # новый формат: quota metric name
+            or "per_day" in body_l              # старый формат
+            or "requests_per_day" in body_l
+            or ("quota exceeded" in body_l and "free_tier" in body_l)
+        )
+        if is_rpd:
             cd = 86400.0
             log.warning("Ключ #%d → RPD-лимит исчерпан, бан на 24ч", idx)
         else:
@@ -299,6 +308,10 @@ class Memory:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 uid TEXT NOT NULL, trick TEXT NOT NULL,
                 ts TEXT DEFAULT (datetime('now','localtime')))""")
+            c.execute("""CREATE TABLE IF NOT EXISTS user_last_seen(
+                uid TEXT PRIMARY KEY,
+                last_ts REAL NOT NULL DEFAULT 0,
+                last_typing_ts REAL NOT NULL DEFAULT 0)""")
             c.execute("CREATE INDEX IF NOT EXISTS idx_f  ON user_facts(uid)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_h  ON chat_history(uid)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_sv ON sticker_vault(emotion)")
@@ -392,6 +405,39 @@ class Memory:
         return [r["trick"] for r in rows]
 
 
+
+    def touch(self, uid: str):
+        """Обновляем время последнего сообщения от юзера."""
+        with self._conn() as c:
+            c.execute("""INSERT INTO user_last_seen(uid, last_ts) VALUES(?,?)
+                ON CONFLICT(uid) DO UPDATE SET last_ts=excluded.last_ts""",
+                (uid, time.time()))
+
+    def touch_typing(self, uid: str):
+        """Юзер начал печатать — запоминаем время."""
+        with self._conn() as c:
+            c.execute("""INSERT INTO user_last_seen(uid, last_typing_ts, last_ts) VALUES(?,?,?)
+                ON CONFLICT(uid) DO UPDATE SET last_typing_ts=excluded.last_typing_ts""",
+                (uid, time.time(), time.time()))
+
+    def get_last_seen(self, uid: str) -> float:
+        with self._conn() as c:
+            row = c.execute("SELECT last_ts FROM user_last_seen WHERE uid=?", (uid,)).fetchone()
+        return row["last_ts"] if row else 0.0
+
+    def get_last_typing(self, uid: str) -> float:
+        with self._conn() as c:
+            row = c.execute("SELECT last_typing_ts FROM user_last_seen WHERE uid=?", (uid,)).fetchone()
+        return row["last_typing_ts"] if row else 0.0
+
+    def get_all_active_uids(self, min_age_sec: float = 10800) -> list[str]:
+        """Возвращает uid юзеров у которых есть история и последнее сообщение >= min_age_sec назад."""
+        cutoff = time.time() - min_age_sec
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT uid FROM user_last_seen WHERE last_ts > 0 AND last_ts < ?",
+                (cutoff,)).fetchall()
+        return [r["uid"] for r in rows]
 
     def push(self, uid: str, role: str, content: str):
         with self._conn() as c:
@@ -729,6 +775,47 @@ def _fix_gender(text: str) -> str:
     return text
 
 
+def _murkaify(text: str) -> str:
+    """Постобработка ответа — делает текст живее:
+    - убирает лишние знаки препинания в конце
+    - если текст длинный и нет переносов — разбивает на абзацы по смысловым паузам
+    - убирает типичные ИИ-маркеры (конечно!, рада помочь и т.д.)
+    """
+    if not text:
+        return text
+
+    # убираем жёсткие ИИ-фразы если вдруг просочились
+    ai_phrases = [
+        r"(?i)конечно[,!]?\s*",
+        r"(?i)отличный вопрос[!.]?\s*",
+        r"(?i)я рада помочь[.!]?\s*",
+        r"(?i)с удовольствием[!.]?\s*",
+    ]
+    for p in ai_phrases:
+        text = re.sub(p, "", text)
+
+    # если ответ длиннее ~200 символов и нет переносов строк —
+    # разбиваем на абзацы по союзам/паузам чтобы выглядело как несколько сообщений
+    if len(text) > 200 and text.count("\n") < 2:
+        # разбиваем после завершённых предложений (. ! ?) длиннее 60 символов
+        parts = re.split(r"(?<=[.!?])\s+(?=[А-ЯЁA-Z а-яёa-z])", text)
+        if len(parts) > 1:
+            # группируем в куски по ~100-180 символов
+            chunks, cur = [], ""
+            for p in parts:
+                if cur and len(cur) + len(p) > 160:
+                    chunks.append(cur.strip())
+                    cur = p
+                else:
+                    cur = (cur + " " + p).strip() if cur else p
+            if cur:
+                chunks.append(cur.strip())
+            if len(chunks) > 1:
+                text = "\n\n".join(chunks)
+
+    return text.strip()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1051,6 +1138,7 @@ async def ai_chat(session: aiohttp.ClientSession, uid_str: str, text: str,
         "max_tokens": 2048, "messages": messages,
     })
     answer = _fix_gender(answer)
+    answer = _murkaify(answer)
     if answer not in _FALLBACKS:
         mem.push(uid_str, "user",      text)
         mem.push(uid_str, "assistant", answer)
@@ -1535,34 +1623,68 @@ def _fmt(text: str) -> str:
     return text
 
 
+async def _send_chunk(msg: Message, chunk: str, html_mode: bool, **kwargs):
+    """Отправляет один кусок текста. Пробует HTML, fallback на plain."""
+    if not chunk.strip():
+        return
+    if html_mode:
+        try:
+            await msg.answer(chunk, parse_mode="HTML", **kwargs)
+            return
+        except Exception:
+            pass
+    # strip HTML тегов для plain fallback
+    plain = re.sub(r"<[^>]+>", "", chunk)
+    await msg.answer(plain, **kwargs)
+
+
 async def send_smart(msg: Message, text: str, reply_to_msg_id: int | None = None):
     if not text or not text.strip():
         return
-    # схлопываем тройные+ переносы в двойные, двойные оставляем (разбивка на сообщения)
     text = re.sub(r'\n{3,}', '\n\n', text.strip())
-    # схлопываем одиночные переносы внутри абзаца в пробел (убирает "слово\nслово")
     text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
     text = re.sub(r' {2,}', ' ', text).strip()
     formatted = _fmt(text)
-    MAX = 4000
-    kwargs = {}
+    MAX = 3800  # 4096 лимит TG, -300 запас на HTML теги
+    kwargs: dict = {}
     if reply_to_msg_id:
         kwargs["reply_to_message_id"] = reply_to_msg_id
-    if len(formatted) <= MAX:
-        try:   await msg.answer(formatted, parse_mode="HTML", **kwargs); return
-        except: await msg.answer(text, **kwargs); return
+    first = True
+    # Режем по двойным переносам (абзацы), затем по словам если абзац велик
+    chunks: list[str] = []
     cur = ""
     for line in formatted.split("\n"):
-        if len(cur) + len(line) + 1 > MAX:
-            try:   await msg.answer(cur or line, parse_mode="HTML", **kwargs)
-            except: await msg.answer(cur or line, **kwargs)
-            cur = line
-            kwargs = {}  # reply только к первому
+        test = (cur + "\n" + line).lstrip("\n") if cur else line
+        if len(test) > MAX:
+            if cur:
+                chunks.append(cur)
+            # сам line может быть >MAX — режем по словам
+            if len(line) > MAX:
+                words = line.split(" ")
+                wchunk = ""
+                for w in words:
+                    if len(wchunk) + len(w) + 1 > MAX:
+                        if wchunk: chunks.append(wchunk)
+                        wchunk = w
+                    else:
+                        wchunk = (wchunk + " " + w).strip()
+                if wchunk: chunks.append(wchunk)
+            else:
+                cur = line
+                continue
+            cur = ""
         else:
-            cur = (cur + "\n" + line).lstrip("\n")
+            cur = test
     if cur:
-        try:   await msg.answer(cur, parse_mode="HTML")
-        except: await msg.answer(cur)
+        chunks.append(cur)
+    for chunk in chunks:
+        if not chunk.strip():
+            continue
+        kw = kwargs if first else {}
+        await _send_chunk(msg, chunk, html_mode=True, **kw)
+        first = False
+        if len(chunks) > 1:
+            await asyncio.sleep(0.15)  # небольшая пауза между сообщениями
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2046,12 +2168,21 @@ async def on_photo(msg: Message, aiohttp_session: aiohttp.ClientSession):
 
 @dp.message(F.document)
 async def on_document(msg: Message, aiohttp_session: aiohttp.ClientSession):
+    doc  = msg.document
+    mime = (doc.mime_type or "").lower()
+    fname_lower = (doc.file_name or "").lower()
+    # Гифки отправленные как файл (image/gif) или mp4-анимации
+    if mime == "image/gif" or (mime == "video/mp4" and fname_lower.endswith(".gif")):
+        thumb_fid = doc.thumbnail.file_id if doc.thumbnail else None
+        await _process_gif(msg, aiohttp_session, doc.file_id, thumb_fid,
+                           (msg.caption or "").strip())
+        return
     u      = uid(msg)
     mem.reset_sticker_streak(u)
+    mem.touch(u)
     stop = asyncio.Event()
     asyncio.create_task(_typing_loop(msg.chat.id, stop))
     try:
-        doc     = msg.document
         fname   = doc.file_name or "file"
         raw     = await dl(doc.file_id)
         content = read_file(raw, fname)
@@ -2071,23 +2202,27 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
     u       = uid(msg)
     sticker = msg.sticker
     streak  = mem.inc_sticker_streak(u)
-
-    if sticker.is_animated or sticker.is_video:
-        emoji  = sticker.emoji or "🤔"
-        if streak >= 3 and mem.vault_size() > 0:
-            # стикер войну — отвечаем стикером
-            pick = mem.random_sticker("sticker") or mem.random_sticker()
-            if pick:
-                try: await msg.answer_sticker(pick["file_id"])
-                except Exception: pass
-                return
-        answer = await ai_chat(aiohttp_session, u,
-            f"тебе скинули стикер {emoji}. отреагируй в своём стиле, коротко.")
-        answer = await maybe_send_sticker(msg, answer)
-        await send_smart(msg, answer)
-        return
+    mem.touch(u)
+    stop    = asyncio.Event()
+    asyncio.create_task(_typing_loop(msg.chat.id, stop))
 
     try:
+        if sticker.is_animated or sticker.is_video:
+            emoji  = sticker.emoji or "🤔"
+            if streak >= 3 and mem.vault_size() > 0:
+                pick = mem.random_sticker("sticker") or mem.random_sticker()
+                if pick:
+                    stop.set()
+                    try: await msg.answer_sticker(pick["file_id"])
+                    except Exception: pass
+                    return
+            answer = await ai_chat(aiohttp_session, u,
+                f"тебе скинули стикер {emoji}. отреагируй в своём стиле, коротко.")
+            stop.set()
+            answer = await maybe_send_sticker(msg, answer)
+            await send_smart(msg, answer)
+            return
+
         raw     = await dl(sticker.file_id)
         img_b64 = base64.b64encode(raw).decode()
         info    = await analyze_sticker_img(aiohttp_session, img_b64, "image/webp")
@@ -2097,10 +2232,10 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
                  info["description"], info["emotion"], mem.vault_size())
 
         if streak >= 3 and mem.vault_size() > 0:
-            # стикер-война: отвечаем подходящим стикером
             results = mem.find_stickers(info["emotion"], file_type="sticker", limit=3)
             pick = random.choice(results) if results else mem.random_sticker("sticker")
             if pick:
+                stop.set()
                 try: await msg.answer_sticker(pick["file_id"])
                 except Exception: pass
                 return
@@ -2110,75 +2245,79 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
             f"настроение: {info['emotion']}. "
             f"отреагируй как обычно пишешь подруге в тг, коротко. "
             f"если хочешь кинуть стикер — [СТИКЕР: теги]")
+        stop.set()
         answer = await maybe_send_sticker(msg, answer)
         await send_smart(msg, answer)
     except Exception as e:
+        stop.set()
         log.exception("on_sticker")
         await msg.answer("чо за стикер я не смогла рассмотреть")
 
 
-@dp.message(F.animation)
-async def on_gif(msg: Message, aiohttp_session: aiohttp.ClientSession):
-    u         = uid(msg)
-    animation = msg.animation
-    caption   = (msg.caption or "").strip()
-    streak    = mem.inc_sticker_streak(u)
-    img_b64   = None
+async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
+                        file_id: str, thumb_file_id: str | None, caption: str):
+    """Общая логика обработки гифки — для F.animation и F.document(gif)."""
+    u      = uid(msg)
+    streak = mem.inc_sticker_streak(u)
+    mem.touch(u)
+    stop   = asyncio.Event()
+    asyncio.create_task(_typing_loop(msg.chat.id, stop))
+    img_b64 = None
 
-    # Telegram отдаёт гифки как mp4 — thumbnail тоже бывает недоступен
-    # Пробуем: 1) thumbnail 2) извлечь кадр ffmpeg из самого файла
-    if animation.thumbnail:
+    # Пробуем thumbnail, потом первый кадр через ffmpeg
+    if thumb_file_id:
         try:
-            raw     = await dl(animation.thumbnail.file_id)
+            raw = await dl(thumb_file_id)
             img_b64 = base64.b64encode(raw).decode()
         except Exception:
             pass
 
     if not img_b64:
         try:
-            raw = await dl(animation.file_id)
-            # Telegram гифки — это mp4. Извлекаем первый кадр через ffmpeg
+            raw   = await dl(file_id)
             frame = await extract_frame_from_video(raw, "mp4")
             if frame:
                 img_b64 = base64.b64encode(frame).decode()
         except Exception as e:
             log.warning("gif frame extract fail: %s", e)
 
+    async def _send_gif_reply(fid: str, ftype: str):
+        try:
+            if ftype == "gif":
+                await msg.answer_animation(fid)
+            else:
+                await msg.answer_sticker(fid)
+        except Exception as ex:
+            log.warning("gif reply fail: %s", ex)
+
     if img_b64:
         info = await analyze_sticker_img(aiohttp_session, img_b64, "image/jpeg")
-        mem.save_sticker(animation.file_id, "gif",
-                         info["description"], info["emotion"], u)
+        mem.save_sticker(file_id, "gif", info["description"], info["emotion"], u)
+        log.info("Гифка: %s | %s | всего: %d",
+                 info["description"], info["emotion"], mem.vault_size())
 
         if streak >= 3 and mem.vault_size() > 0:
             results = mem.find_stickers(info["emotion"], file_type="gif", limit=3)
             pick = random.choice(results) if results else mem.random_sticker("gif")
             if not pick: pick = mem.random_sticker()
             if pick:
-                try:
-                    if pick["file_type"] == "gif":
-                        await msg.answer_animation(pick["file_id"])
-                    else:
-                        await msg.answer_sticker(pick["file_id"])
-                except Exception: pass
+                stop.set()
+                await _send_gif_reply(pick["file_id"], pick["file_type"])
                 return
 
         prompt = (
             f"тебе скинули гифку. на ней: {info['description']}. "
             f"настроение: {info['emotion']}. "
             + (f"подпись: {caption}. " if caption else "")
-            + "отреагируй как обычно пишешь в тг. "
-            f"если хочешь кинуть гифку — [ГИФКА: теги]"
+            + "отреагируй как обычно пишешь в тг, коротко. "
+            "если хочешь кинуть гифку — [ГИФКА: теги]"
         )
     else:
         if streak >= 3 and mem.vault_size() > 0:
             pick = mem.random_sticker("gif") or mem.random_sticker()
             if pick:
-                try:
-                    if pick["file_type"] == "gif":
-                        await msg.answer_animation(pick["file_id"])
-                    else:
-                        await msg.answer_sticker(pick["file_id"])
-                except Exception: pass
+                stop.set()
+                await _send_gif_reply(pick["file_id"], pick["file_type"])
                 return
         prompt = (
             "тебе скинули гифку"
@@ -2187,11 +2326,25 @@ async def on_gif(msg: Message, aiohttp_session: aiohttp.ClientSession):
         )
     try:
         answer = await ai_chat(aiohttp_session, u, prompt)
+        stop.set()
         answer = await maybe_send_sticker(msg, answer)
         await send_smart(msg, answer)
     except Exception:
+        stop.set()
         log.exception("on_gif")
         await msg.answer(random.choice(["ну и гифка", "чо за движуха", "😎"]))
+
+
+@dp.message(F.animation)
+async def on_gif(msg: Message, aiohttp_session: aiohttp.ClientSession):
+    """Нативные TG гифки из поиска — приходят как F.animation (mp4 без звука)."""
+    anim = msg.animation
+    thumb_fid = anim.thumbnail.file_id if anim.thumbnail else None
+    await _process_gif(msg, aiohttp_session, anim.file_id, thumb_fid,
+                       (msg.caption or "").strip())
+
+
+
 
 
 @dp.message(F.video | F.video_note)
@@ -2371,6 +2524,7 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
                 return
             # pic не нашёл — отвечаем текстом как обычно
 
+        mem.touch(u)
         answer = await ai_chat(aiohttp_session, u, text)
         stop.set()
         answer = await maybe_send_sticker(msg, answer)
@@ -2411,6 +2565,109 @@ async def on_draw_inline(msg: Message, aiohttp_session: aiohttp.ClientSession):
         stop.set()
         log.exception("on_draw_inline")
         await msg.answer(_fallback())
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ПРОАКТИВНЫЕ СООБЩЕНИЯ — мурка пишет сама
+# ══════════════════════════════════════════════════════════════════════════════
+
+# uid → asyncio.Task: задача "ты что уснул" при долгой печати
+_typing_tasks: dict[str, asyncio.Task] = {}
+# uid → время когда мурка последний раз написала сама (чтобы не спамить)
+_proactive_last: dict[str, float] = {}
+
+
+@dp.message(F.chat_type == "private")
+async def on_typing_update(msg: Message):
+    """Перехватываем chat_action=typing чтобы запустить таймер 'ты что пишешь'."""
+    pass  # aiogram не даёт chat_action через F.text — используем webhook event
+
+
+async def _typing_timeout_task(chat_id: int, uid: str, delay: float = 65):
+    """Через delay секунд молчания после начала печати — мурка пишет 'ты что уснул'."""
+    await asyncio.sleep(delay)
+    # если юзер уже написал после начала печати — не пишем
+    since_last = time.time() - mem.get_last_seen(uid)
+    if since_last < delay - 5:
+        return
+    phrases = [
+        "эй ты там уснул чтоли",
+        "ебать ты поэму пишешь",
+        "ты не сдох?",
+        "жду жду жду...",
+        "ты там вообще?",
+        "печатаешь уже сто лет бля",
+        "это нормально вообще столько печатать",
+        "ну и чо там",
+        "я ж тут сижу жду",
+        "слушай ну давай уже",
+    ]
+    try:
+        await bot.send_message(chat_id, random.choice(phrases))
+        log.info("typing timeout msg → chat %d", chat_id)
+    except Exception as e:
+        log.warning("proactive typing msg fail: %s", e)
+    finally:
+        _typing_tasks.pop(uid, None)
+
+
+async def _proactive_loop(session: aiohttp.ClientSession):
+    """Фоновая задача: раз в сутки (в случайное время) — мурка пишет сама.
+    Условие: юзер молчит 6+ часов и сегодня ещё не писала.
+    """
+    await asyncio.sleep(random.randint(1800, 7200))  # стартуем через 30мин-2ч после запуска
+    while True:
+        try:
+            # проверяем раз в час — но пишем не чаще раза в 24ч на юзера
+            await asyncio.sleep(3600)
+            now = time.time()
+            uids = mem.get_all_active_uids(min_age_sec=21600)  # молчат 6+ часов
+            for uid_str in uids:
+                # не писать чаще раза в 24 часа
+                last_proactive = _proactive_last.get(uid_str, 0)
+                if now - last_proactive < 86400:
+                    continue
+
+                last = mem.get_last_seen(uid_str)
+                silent_hours = (now - last) / 3600
+
+                # не пишем если молчат больше 3 суток — неактивный юзер
+                if silent_hours > 72:
+                    continue
+
+                # парсим chat_id
+                chat_id = None
+                if uid_str.startswith("tg:"):
+                    try: chat_id = int(uid_str[3:])
+                    except: continue
+                else:
+                    try: chat_id = int(uid_str)
+                    except: continue
+
+                log.info("proactive msg → %s (молчит %.1fч)", uid_str, silent_hours)
+                _proactive_last[uid_str] = now
+                asyncio.create_task(_send_proactive(session, chat_id, uid_str, silent_hours))
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.error("proactive_loop err: %s", e)
+
+
+async def _send_proactive(session: aiohttp.ClientSession, chat_id: int,
+                           uid_str: str, silent_hours: float):
+    """Генерируем и отправляем проактивное сообщение от мурки."""
+    if silent_hours < 5:
+        ctx = "юзер молчит несколько часов. напиши ему что-нибудь живое — можешь соскучиться, спросить как дела, рассказать что-то смешное что типо только что случилось с тобой, или просто кинуть рандомную мысль. коротко, в своём стиле, без вопросов типа 'ты там?'"
+    else:
+        ctx = "юзер давно не писал. можешь рассказать какую-то мини-историю которая типо только что с тобой произошла (выдуманную, смешную или странную), или написать что-то абсурдное вдруг. коротко. не спрашивай 'ты где'."
+
+    try:
+        answer = await ai_chat(session, uid_str, f"[системное: {ctx}]")
+        if answer and answer not in _FALLBACKS:
+            await bot.send_message(chat_id, answer)
+            log.info("proactive sent → %s", uid_str)
+    except Exception as e:
+        log.warning("proactive send fail %s: %s", uid_str, e)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2510,6 +2767,7 @@ async def main():
         dp.update.middleware(SessionMiddleware(session))
         dp.update.outer_middleware(AccessMiddleware())
         log.info("Murka Bot v8 запущена")
+        asyncio.create_task(_proactive_loop(session))
         # skip_updates=True + drop_pending_updates предотвращают TelegramConflictError на Railway:
         # при рестарте контейнера старый процесс может ещё держать сессию.
         # drop_pending_updates сбрасывает накопившуюся очередь при старте.
