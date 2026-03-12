@@ -890,6 +890,12 @@ def _murkaify(text: str) -> str:
     if not text:
         return text
 
+    # убираем [ЭМОДЗИ 😎] → просто 😎  (модель иногда так оформляет)
+    text = re.sub(r'\[эмодзи\s*([^\]]*)\]', lambda m: m.group(1).strip(), text, flags=re.I)
+    # также [смайл: 😂] и подобные варианты
+    text = re.sub(r'\[\s*смайл[:\s]*([^\]]*)\]', lambda m: m.group(1).strip(), text, flags=re.I)
+    text = re.sub(r'\[\s*emoji[:\s]*([^\]]*)\]', lambda m: m.group(1).strip(), text, flags=re.I)
+
     # убираем жёсткие ИИ-фразы если вдруг просочились
     ai_phrases = [
         r"(?i)конечно[,!]?\s*",
@@ -1699,16 +1705,16 @@ async def analyze_sticker_img(session, img_b64: str, mt: str = "image/webp") -> 
 # STICKER HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
-# счётчик сообщений для редких стикеров
+# сколько сообщений прошло с последнего стикера (на юзера)
 _sticker_msg_counter: dict[str, int] = {}
-
-# глобальный флаг: был ли уже послан стикер в текущем ответе
-_sticker_sent_this_turn: dict[str, float] = {}
+# ts последнего отправленного стикера
+_sticker_last_sent: dict[str, float] = {}
 
 async def maybe_send_sticker(msg: Message, answer: str,
                               allow_sticker: bool = True) -> str:
     """Обрабатывает [СТИКЕР:] и [ГИФКА:] теги в ответе.
-    allow_sticker=False — убирает теги но не шлёт (антиспам).
+    allow_sticker=False — убирает теги но не шлёт.
+    Реальный контроль частоты: минимум 8 сообщений между стикерами.
     """
     sm = re.search(r"\[СТИКЕР:\s*([^\]]+)\]", answer, re.I)
     gm = re.search(r"\[ГИФКА:\s*([^\]]+)\]",  answer, re.I)
@@ -1716,9 +1722,19 @@ async def maybe_send_sticker(msg: Message, answer: str,
     file_type = "sticker" if sm else "gif"
 
     u_key = str(msg.chat.id)
-    already_sent = time.time() - _sticker_sent_this_turn.get(u_key, 0) < 3
+    # считаем сообщения
+    _sticker_msg_counter[u_key] = _sticker_msg_counter.get(u_key, 0) + 1
+    msgs_since_last = _sticker_msg_counter[u_key]
+    min_gap = random.randint(8, 14)  # минимум 8-14 сообщений между стикерами
 
-    if match and mem.vault_size() > 0 and allow_sticker and not already_sent:
+    can_send = (
+        allow_sticker
+        and match
+        and mem.vault_size() > 0
+        and msgs_since_last >= min_gap
+    )
+
+    if can_send:
         tags    = match.group(1).strip()
         results = mem.find_stickers(tags, file_type=file_type, limit=5)
         if not results:
@@ -1730,32 +1746,19 @@ async def maybe_send_sticker(msg: Message, answer: str,
                     await msg.answer_sticker(pick["file_id"])
                 else:
                     await msg.answer_animation(pick["file_id"])
-                _sticker_sent_this_turn[u_key] = time.time()
+                _sticker_msg_counter[u_key] = 0  # сброс счётчика
+                _sticker_last_sent[u_key] = time.time()
             except Exception as e:
                 log.warning("Стикер не отправился: %s", e)
 
-    # убираем теги из текста
+    # убираем теги из текста всегда
     answer = re.sub(r"\[(СТИКЕР|ГИФКА):\s*[^\]]+\]", "", answer, flags=re.I).strip()
     return answer
 
 
 async def maybe_force_sticker(msg: Message, uid_str: str):
-    """Редкий случайный стикер — примерно каждые 6-8 сообщений."""
-    if mem.vault_size() == 0:
-        return
-    _sticker_msg_counter[uid_str] = _sticker_msg_counter.get(uid_str, 0) + 1
-    threshold = random.randint(10, 16)
-    if _sticker_msg_counter[uid_str] >= threshold:
-        _sticker_msg_counter[uid_str] = 0
-        pick = mem.random_sticker()
-        if pick:
-            try:
-                if pick["file_type"] == "sticker":
-                    await msg.answer_sticker(pick["file_id"])
-                else:
-                    await msg.answer_animation(pick["file_id"])
-            except Exception:
-                pass
+    """Отключено — было источником спама стикерами."""
+    pass
 
 
 async def handle_sticker_streak(msg: Message, uid_str: str,
@@ -2450,17 +2453,6 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
         log.info("Стикер: %s | %s | всего: %d",
                  info["description"], info["emotion"], mem.vault_size())
 
-        # streak >= 3 — стикер-война: ответить своим стикером (без текста)
-        if streak >= 3 and mem.vault_size() > 0:
-            kw = info.get("keywords") or info["emotion"]
-            results = mem.find_stickers(kw, file_type="sticker", limit=3)
-            pick = random.choice(results) if results else mem.random_sticker("sticker")
-            if pick:
-                stop.set()
-                try: await msg.answer_sticker(pick["file_id"])
-                except Exception: pass
-                return
-
         # Редко (8%) — ответить только стикером без текста
         if mem.vault_size() > 0 and random.random() < 0.08:
             kw = info.get("keywords") or info["emotion"]
@@ -2540,18 +2532,7 @@ async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
         log.info("Гифка: %s | %s | всего: %d",
                  info["description"], info["emotion"], mem.vault_size())
 
-        # streak >= 3: гифка-война
-        if streak >= 3 and mem.vault_size() > 0:
-            kw = info.get("keywords") or info["emotion"]
-            results = mem.find_stickers(kw, file_type="gif", limit=3)
-            pick = random.choice(results) if results else mem.random_sticker("gif")
-            if not pick: pick = mem.random_sticker()
-            if pick:
-                stop.set()
-                await _send_gif_reply(pick["file_id"], pick["file_type"])
-                return
-
-        # Редко (8%) — ответить только гифкой
+        # Редко (8%) — ответить только гифкой без текста
         if mem.vault_size() > 0 and random.random() < 0.08:
             kw = info.get("keywords") or info["emotion"]
             gif_results = mem.find_stickers(kw, file_type="gif", limit=3)
