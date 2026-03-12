@@ -273,7 +273,7 @@ class Memory:
     HISTORY_LIMIT = 24  # 40 было слишком много → большой промт → медленные ответы
 
     def __init__(self):
-        self._db = "murka_memory.db"
+        self._db = "/data/murka_memory.db" if os.path.isdir("/data") else "murka_memory.db"
         self._init()
 
     def _conn(self):
@@ -299,8 +299,14 @@ class Memory:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 file_id TEXT NOT NULL UNIQUE, file_type TEXT NOT NULL,
                 description TEXT NOT NULL, emotion TEXT NOT NULL,
+                keywords TEXT NOT NULL DEFAULT '',
                 from_uid TEXT NOT NULL,
                 ts TEXT DEFAULT (datetime('now','localtime')))""")
+            # Миграция: добавляем keywords если её нет (для старых БД)
+            try:
+                c.execute("ALTER TABLE sticker_vault ADD COLUMN keywords TEXT NOT NULL DEFAULT ''")
+            except Exception:
+                pass  # колонка уже есть
             c.execute("""CREATE TABLE IF NOT EXISTS user_sticker_streak(
                 uid TEXT PRIMARY KEY, streak INTEGER DEFAULT 0,
                 ts TEXT DEFAULT (datetime('now','localtime')))""")
@@ -315,6 +321,7 @@ class Memory:
             c.execute("CREATE INDEX IF NOT EXISTS idx_f  ON user_facts(uid)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_h  ON chat_history(uid)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_sv ON sticker_vault(emotion)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_sv_kw ON sticker_vault(keywords)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_tr ON user_tricks(uid)")
 
     def update_gender(self, uid: str, gender: str):
@@ -332,28 +339,46 @@ class Memory:
         return row["gender"] if row and row["confidence"] >= 2 else None
 
     def save_sticker(self, file_id: str, file_type: str,
-                     description: str, emotion: str, from_uid: str):
+                     description: str, emotion: str, from_uid: str,
+                     keywords: str = ""):
         with self._conn() as c:
             try:
                 c.execute(
                     "INSERT OR IGNORE INTO sticker_vault"
-                    "(file_id,file_type,description,emotion,from_uid) VALUES(?,?,?,?,?)",
-                    (file_id, file_type, description, emotion, from_uid))
+                    "(file_id,file_type,description,emotion,keywords,from_uid) VALUES(?,?,?,?,?,?)",
+                    (file_id, file_type, description, emotion, keywords.lower(), from_uid))
             except Exception:
                 pass
 
-    def find_stickers(self, emotion_tags: str, file_type: str = "",
+    def find_stickers(self, query: str, file_type: str = "",
                       limit: int = 8) -> list[dict]:
+        """Ищет стикеры по описанию, ключевым словам и тегам эмоций."""
         with self._conn() as c:
-            tags = [t.strip().lower() for t in emotion_tags.split(",") if t.strip()]
+            tags = [t.strip().lower() for t in re.split(r"[,\s]+", query) if t.strip() and len(t.strip()) > 1]
             if not tags: return []
-            like_parts = " OR ".join(["LOWER(emotion) LIKE ?" for _ in tags])
-            params     = [f"%{t}%" for t in tags]
             tf = f"AND file_type='{file_type}'" if file_type else ""
+            # Ищем по description, keywords И emotion — приоритет: description/keywords > emotion
+            desc_parts = " OR ".join([
+                "LOWER(description) LIKE ? OR LOWER(keywords) LIKE ?"
+                for _ in tags
+            ])
+            desc_params = []
+            for t in tags:
+                desc_params += [f"%{t}%", f"%{t}%"]
+            # Сначала по описанию
             rows = c.execute(
-                f"SELECT file_id,file_type,description,emotion FROM sticker_vault "
-                f"WHERE ({like_parts}) {tf} ORDER BY RANDOM() LIMIT ?",
-                params + [limit]).fetchall()
+                f"SELECT file_id,file_type,description,emotion,keywords FROM sticker_vault "
+                f"WHERE ({desc_parts}) {tf} ORDER BY RANDOM() LIMIT ?",
+                desc_params + [limit]).fetchall()
+            if rows:
+                return [dict(r) for r in rows]
+            # Если не нашли — по emotion
+            emo_parts = " OR ".join(["LOWER(emotion) LIKE ?" for _ in tags])
+            emo_params = [f"%{t}%" for t in tags]
+            rows = c.execute(
+                f"SELECT file_id,file_type,description,emotion,keywords FROM sticker_vault "
+                f"WHERE ({emo_parts}) {tf} ORDER BY RANDOM() LIMIT ?",
+                emo_params + [limit]).fetchall()
         return [dict(r) for r in rows]
 
     def random_sticker(self, file_type: str = "") -> dict | None:
@@ -688,6 +713,12 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 иногда: "урааааааа" — длина случайная
 иногда тебе лень отвечать развёрнуто и ты пишешь одно слово или эмодзи — это нормально.
 
+═══ РЕГИСТР — ВАЖНО ═══
+пишешь как в мессенджере — строчными буквами.
+НЕ начинай предложения с заглавной буквы после точки — это не школьное сочинение.
+исключения: КАПС для эмоций ("ЧТООООО"), имена из лора (Максим, Изольда), аббревиатуры.
+пример правильно: "окей. сделаю. потом." — не "Окей. Сделаю. Потом."
+
 ═══ ЖИВЫЕ ОПЕЧАТКИ И СЛОВА ═══
 иногда (редко, не каждое сообщение) допускаешь живые опечатки как при быстром наборе:
 "тлько" "каго" "этт" "чтоб" "ваще" "незнаю" "прям" "кста" "сор" "норм" "ок" "кк" "аа" "ммм"
@@ -801,11 +832,46 @@ def _fix_gender(text: str) -> str:
     return text
 
 
+def _decapitalize(text: str) -> str:
+    """Убирает автокапитализацию предложений — мурка пишет как в мессенджере.
+    НЕ трогает: КАПС целиком (эмоции), имена собственные из лора, первое слово.
+    """
+    # Паттерн: после . ! ? пробел + заглавная буква + строчные → делаем строчную
+    # Исключение: если всё слово капсом (эмоция) — не трогаем
+    def lower_after_punct(m):
+        punct = m.group(1)
+        space = m.group(2)
+        word  = m.group(3)
+        rest  = m.group(4)
+        # если слово целиком заглавное (капс) — не трогаем
+        if word == word.upper() and len(word) > 1:
+            return punct + space + word + rest
+        return punct + space + word.lower() + rest
+    text = re.sub(r'([.!?])( +)([А-ЯЁA-Z])([а-яёa-z]*)', lower_after_punct, text)
+    # Также: начало строки после \n
+    def lower_after_newline(m):
+        word = m.group(1)
+        rest = m.group(2)
+        if word == word.upper() and len(word) > 1:
+            return word + rest
+        return word.lower() + rest
+    lines = text.split("\n")
+    result = []
+    for i, line in enumerate(lines):
+        if i == 0:
+            result.append(line)  # первую строку не трогаем
+            continue
+        # строки после переноса — тоже строчные если не КАПС
+        fixed = re.sub(r'^([А-ЯЁA-Z])([а-яёa-z]*)', lower_after_newline, line.lstrip())
+        result.append(fixed)
+    return "\n".join(result)
+
+
 def _murkaify(text: str) -> str:
     """Постобработка ответа — делает текст живее:
-    - убирает лишние знаки препинания в конце
-    - если текст длинный и нет переносов — разбивает на абзацы по смысловым паузам
-    - убирает типичные ИИ-маркеры (конечно!, рада помочь и т.д.)
+    - убирает капитализацию предложений (мессенджерный стиль)
+    - разбивает длинный текст без переносов на абзацы
+    - убирает ИИ-фразы
     """
     if not text:
         return text
@@ -839,6 +905,7 @@ def _murkaify(text: str) -> str:
             if len(chunks) > 1:
                 text = "\n\n".join(chunks)
 
+    text = _decapitalize(text)
     return text.strip()
 
 
@@ -1534,23 +1601,27 @@ async def analyze_sticker_img(session, img_b64: str, mt: str = "image/webp") -> 
                 "1. Опиши что изображено кратко (1-2 предложения).\n"
                 "2. Если на изображении есть ТЕКСТ (надписи, слова, фразы) — обязательно укажи его дословно.\n"
                 "3. Теги эмоций через запятую (только из: funny,hype,sad,angry,love,shocked,cringe,lol,facepalm,cute,based,cope,random).\n"
+                "4. Ключевые слова для поиска: персонажи, объекты, действия, настроение — через запятую (например: миньон,банан,радость или кот,спит,лень).\n"
                 "Формат строго:\n"
                 "DESC: <описание>\n"
                 "TEXT: <текст на изображении или 'нет'>\n"
-                "EMO: <теги>"},
+                "EMO: <теги>\n"
+                "KEYS: <ключевые слова>"},
         ]},
     ], Secrets.MODEL_VISION)
-    desc, emo, text_on_img = "стикер", "funny", ""
+    desc, emo, text_on_img, keys = "стикер", "funny", "", ""
     for line in raw.split("\n"):
         if line.startswith("DESC:"): desc = line[5:].strip()
         elif line.startswith("EMO:"): emo  = line[4:].strip().lower()
+        elif line.startswith("KEYS:"): keys = line[5:].strip().lower()
         elif line.startswith("TEXT:"):
             t = line[5:].strip()
             if t.lower() not in ("нет", "no", "none", "-", ""):
                 text_on_img = t
     if text_on_img:
         desc = f"{desc}. текст на изображении: «{text_on_img}»"
-    return {"description": desc, "emotion": emo, "text": text_on_img}
+        keys = (keys + "," + text_on_img.lower()).strip(",")
+    return {"description": desc, "emotion": emo, "text": text_on_img, "keywords": keys}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1560,14 +1631,23 @@ async def analyze_sticker_img(session, img_b64: str, mt: str = "image/webp") -> 
 # счётчик сообщений для редких стикеров
 _sticker_msg_counter: dict[str, int] = {}
 
-async def maybe_send_sticker(msg: Message, answer: str) -> str:
-    """Обрабатывает [СТИКЕР:] и [ГИФКА:] теги в ответе."""
+# глобальный флаг: был ли уже послан стикер в текущем ответе
+_sticker_sent_this_turn: dict[str, float] = {}
+
+async def maybe_send_sticker(msg: Message, answer: str,
+                              allow_sticker: bool = True) -> str:
+    """Обрабатывает [СТИКЕР:] и [ГИФКА:] теги в ответе.
+    allow_sticker=False — убирает теги но не шлёт (антиспам).
+    """
     sm = re.search(r"\[СТИКЕР:\s*([^\]]+)\]", answer, re.I)
     gm = re.search(r"\[ГИФКА:\s*([^\]]+)\]",  answer, re.I)
     match     = sm or gm
     file_type = "sticker" if sm else "gif"
 
-    if match and mem.vault_size() > 0:
+    u_key = str(msg.chat.id)
+    already_sent = time.time() - _sticker_sent_this_turn.get(u_key, 0) < 3
+
+    if match and mem.vault_size() > 0 and allow_sticker and not already_sent:
         tags    = match.group(1).strip()
         results = mem.find_stickers(tags, file_type=file_type, limit=5)
         if not results:
@@ -1579,6 +1659,7 @@ async def maybe_send_sticker(msg: Message, answer: str) -> str:
                     await msg.answer_sticker(pick["file_id"])
                 else:
                     await msg.answer_animation(pick["file_id"])
+                _sticker_sent_this_turn[u_key] = time.time()
             except Exception as e:
                 log.warning("Стикер не отправился: %s", e)
 
@@ -2253,13 +2334,25 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
         img_b64 = base64.b64encode(raw).decode()
         info    = await analyze_sticker_img(aiohttp_session, img_b64, "image/webp")
         mem.save_sticker(sticker.file_id, "sticker",
-                         info["description"], info["emotion"], u)
+                         info["description"], info["emotion"], u,
+                         info.get("keywords", ""))
         log.info("Стикер: %s | %s | всего: %d",
                  info["description"], info["emotion"], mem.vault_size())
 
         if streak >= 3 and mem.vault_size() > 0:
-            results = mem.find_stickers(info["emotion"], file_type="sticker", limit=3)
+            kw = info.get("keywords") or info["emotion"]
+            results = mem.find_stickers(kw, file_type="sticker", limit=3)
             pick = random.choice(results) if results else mem.random_sticker("sticker")
+            if pick:
+                stop.set()
+                try: await msg.answer_sticker(pick["file_id"])
+                except Exception: pass
+                return
+
+        # Шанс ответить ТОЛЬКО стикером без текста — редко (10%)
+        if mem.vault_size() > 0 and random.random() < 0.10:
+            pick = mem.find_stickers(info["emotion"], file_type="sticker", limit=3)
+            pick = random.choice(pick) if pick else mem.random_sticker("sticker")
             if pick:
                 stop.set()
                 try: await msg.answer_sticker(pick["file_id"])
@@ -2270,9 +2363,10 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
             f"тебе скинули стикер. на нём: {info['description']}. "
             f"настроение: {info['emotion']}. "
             f"отреагируй как обычно пишешь подруге в тг, коротко. "
-            f"если хочешь кинуть стикер — [СТИКЕР: теги]")
+            f"НЕ предлагай стикер в ответ — просто напиши текстом.")
         stop.set()
-        answer = await maybe_send_sticker(msg, answer)
+        # НЕ шлём ещё стикер — только что уже мог быть streak-стикер
+        answer = await maybe_send_sticker(msg, answer, allow_sticker=False)
         await send_smart(msg, answer)
     except Exception as e:
         stop.set()
@@ -2327,7 +2421,8 @@ async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
 
     if img_b64:
         info = await analyze_sticker_img(aiohttp_session, img_b64, "image/jpeg")
-        mem.save_sticker(file_id, "gif", info["description"], info["emotion"], u)
+        mem.save_sticker(file_id, "gif", info["description"], info["emotion"], u,
+                         info.get("keywords", ""))
         log.info("Гифка: %s | %s | всего: %d",
                  info["description"], info["emotion"], mem.vault_size())
 
@@ -2340,12 +2435,20 @@ async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
                 await _send_gif_reply(pick["file_id"], pick["file_type"])
                 return
 
+        # Шанс ответить ТОЛЬКО гифкой без текста — редко (10%)
+        if mem.vault_size() > 0 and random.random() < 0.10:
+            gif_results = mem.find_stickers(info["emotion"], file_type="gif", limit=3)
+            gif_pick = random.choice(gif_results) if gif_results else mem.random_sticker("gif")
+            if gif_pick:
+                stop.set()
+                await _send_gif_reply(gif_pick["file_id"], gif_pick["file_type"])
+                return
+
         prompt = (
             f"тебе скинули гифку. на ней: {info['description']}. "
             f"настроение: {info['emotion']}. "
             + (f"подпись: {caption}. " if caption else "")
-            + "отреагируй как обычно пишешь в тг, коротко. "
-            "если хочешь кинуть гифку — [ГИФКА: теги]"
+            + "отреагируй как обычно пишешь в тг, коротко. без стикеров."
         )
     else:
         if streak >= 3 and mem.vault_size() > 0:
@@ -2543,15 +2646,37 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
             _music_waiting.add(u)  # снова ждём
             return
 
+        # запрос стикера — "скинь стикер с миньоном" / "кинь стикер"
+        sticker_req = re.search(
+            r"(?i)(скинь|кинь|дай|покажи|найди).{0,25}(стикер)",
+            text
+        )
+        if sticker_req and mem.vault_size() > 0:
+            q = re.sub(r"(?i)(скинь|кинь|дай|покажи|найди).{0,25}(стикер)\s*(с|про|на|из)?\s*", "", text).strip()
+            results = mem.find_stickers(q, file_type="sticker", limit=5) if q else []
+            pick = random.choice(results) if results else mem.random_sticker("sticker")
+            stop.set()
+            if pick:
+                try:
+                    await msg.answer_sticker(pick["file_id"])
+                    await send_smart(msg, random.choice(["на", "держи", "вот", "нашла чот"]))
+                except Exception as e:
+                    log.warning("sticker req fail: %s", e)
+            else:
+                await send_smart(msg, random.choice([
+                    "у меня пока стикеров нет — скидывай мне, буду собирать",
+                    "нет ещё нормальных, скинь сначала",
+                ]))
+            return
+
         # запрос гифки из vault
         gif_match = re.search(
-            r"(?i)(скинь|кинь|дай|покажи|найди).{0,20}(гифк|гиф)",
+            r"(?i)(скинь|кинь|дай|покажи|найди).{0,20}(гифк|гиф)",
             text
         )
         if gif_match and mem.vault_size() > 0:
-            # пытаемся найти подходящую по тегу из запроса
-            tag_query = re.sub(r"(?i)(скинь|кинь|дай|покажи|найди).{0,20}(гифк|гиф)\s*", "", text).strip()
-            results = mem.find_stickers(tag_query or "funny", file_type="gif", limit=5) if tag_query else []
+            tag_query = re.sub(r"(?i)(скинь|кинь|дай|покажи|найди).{0,20}(гифк|гиф)\s*(с|про|на)?\s*", "", text).strip()
+            results = mem.find_stickers(tag_query, file_type="gif", limit=5) if tag_query else []
             pick = random.choice(results) if results else mem.random_sticker("gif")
             stop.set()
             if pick:
@@ -2565,7 +2690,6 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
                 await send_smart(msg, random.choice([
                     "у меня пока нет гифок — скинь мне какую-нибудь я запомню",
                     "гифок нет ещё, кидай мне — буду собирать",
-                    "не накопила пока, скинь сначала"
                 ]))
             return
 
