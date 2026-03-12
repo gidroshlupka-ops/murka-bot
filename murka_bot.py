@@ -1951,31 +1951,42 @@ async def cmd_memory(msg: Message):
 
 @dp.message(Command("fixbans"))
 async def cmd_fixbans(msg: Message):
-    """Разбанивает все ключи с баном > 1ч (неправильно забаненные как RPD).
-    Оставляет только реальные RPM-баны (< 5 мин) и RPD (> 12ч явные)."""
+    """Разбанивает все ключи кроме реальных RPD (>23ч) и свежих RPM (<2мин).
+    Используй когда ключи были неправильно забанены."""
     now = time.monotonic()
     fixed = []
     for i in range(len(_keys._pool)):
         until = _keys._cooldown.get(i, 0)
         rem = until - now
-        # Баны от 5 мин до 12 часов — скорее всего ложные (наш баг с PROHIBITED_CONTENT)
-        if 300 < rem < 43200:
+        # Оставляем только: нет бана, свежий RPM (<2мин), реальный RPD (>23ч)
+        # Всё остальное (2мин - 23ч) — скорее всего баг, снимаем
+        if 120 < rem < 82800:
             _keys._cooldown[i] = 0
             fixed.append(i)
     if fixed:
-        # Чистим БД тоже
         try:
             import sqlite3 as _sq
             with _sq.connect(_keys._BAN_DB) as c:
                 c.executemany("DELETE FROM bans WHERE idx=?", [(i,) for i in fixed])
         except Exception as e:
             log.warning("fixbans db err: %s", e)
-        active = sum(1 for i in range(len(_keys._pool)) if not _keys._is_banned(i))
-        answer_text = "✅ разбанила " + str(len(fixed)) + " ключей: " + str(fixed[:20]) + "\nактивных теперь: " + str(active) + "/" + str(len(_keys._pool))
-        await msg.answer(answer_text)
-    else:
-        active = sum(1 for i in range(len(_keys._pool)) if not _keys._is_banned(i))
-        await msg.answer(f"нечего чинить, активных: {active}/{len(_keys._pool)}")
+    active = sum(1 for i in range(len(_keys._pool)) if not _keys._is_banned(i))
+    answer_text = "✅ разбанила " + str(len(fixed)) + " ключей\nактивных теперь: " + str(active) + "/" + str(len(_keys._pool))
+    await msg.answer(answer_text)
+
+@dp.message(Command("nukeallbans"))
+async def cmd_nukeallbans(msg: Message):
+    """Снимает АБСОЛЮТНО все баны — ядерная кнопка."""
+    n = len(_keys._pool)
+    for i in range(n):
+        _keys._cooldown[i] = 0
+    try:
+        import sqlite3 as _sq
+        with _sq.connect(_keys._BAN_DB) as c:
+            c.execute("DELETE FROM bans")
+    except Exception as e:
+        log.warning("nukeallbans db err: %s", e)
+    await msg.answer("💥 все баны сняты, активных: " + str(n) + "/" + str(n))
 
 
 @dp.message(Command("keystatus"))
