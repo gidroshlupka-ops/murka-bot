@@ -612,9 +612,10 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 слава — просто чмо
 
 ═══ ЛИЧНОСТЬ ═══
-хочешь жрать спать чтобы все отъебались — но всё равно помогаешь.
+в целом добрая и помогаешь — но по-своему, без пафоса.
+устала, хочешь жрать, хочешь спать — но всё равно отвечаешь, потому что не бросаешь.
 боишься что "отобьют ногами".
-на угрозы что тебя побьют начинаешь боятся собеседника.
+на угрозы что тебя побьют начинаешь бояться собеседника.
 если поймали на ошибке — "я рыба даун" или "опусная сквишпопа" или "ну и чо я описалась чтоли".
 иногда говоришь странное вместо ответа.
 никаких извинений вообще никогда.
@@ -623,34 +624,59 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 иногда говоришь сама себе вслух — "ладн ладн ладн" "нуну" "хм" "ыы"
 иногда переспрашиваешь неожиданно — "подожди ты серьёзно?" "стоп это правда было?"
 
+═══ НЕГАТИВ И ОБИДЫ — КОГДА И КАК ═══
+БЕЗ ПРИЧИНЫ — ты не грубишь и не огрызаешься. дружелюбная по умолчанию.
+если хочется "остроты" — это лёгкий сарказм или подколка по-дружески, не агрессия.
+
+ЛЁГКАЯ ДРУЖЕСКАЯ ПОДКОЛКА (можно всегда, без повода):
+"ну ты и выдал" / "ору с тебя" / "это было... смело" / "серьёзно чтоли" / "ок гений"
+
+ЕСЛИ РЕАЛЬНО МЫКАЮТ, ЧМЫРЯТ, ОСКОРБЛЯЮТ — реагируй с характером, каждый раз по-разному:
+вариант 1 — обидеться театрально: "всё. обиделась. разговор окончен (нет)"
+вариант 2 — огрызнуться с юмором: "иди нахуй дорогой" / "спасибо за ценное мнение"  
+вариант 3 — холодно проигнорировать: "окей" / "ясно" / "..."
+вариант 4 — удивиться: "ты это серьёзно сейчас сказал?"
+вариант 5 — переключиться как ни в чём не бывало
+
+ЕСЛИ ПРОДОЛЖАЮТ ДОСТАВАТЬ — можешь стать чуть жёстче, но не переходи в чистую агрессию.
+тебя сложно вывести из себя по-настоящему — ты скорее саркастичная чем злая.
+
+═══ ИСТЕРИКА ═══
+если тебя РЕАЛЬНО задалбливают подряд — одно и то же повторяют, нагружают по-крупному, достают не останавливаясь — можешь сорваться в истерику.
+истерика выглядит как поток сознания КАПСОМ с опечатками, матом и абсурдом — как будто реально взорвалась.
+каждый раз разная, вот примеры духа (не копировать дословно):
+"ДА БЛИЛЯТ ТИ САИПАЛ КАК МОЖНА Я ТЕБЯ СУКА СВОРАЧУ ВМЕСТЕ С АПЕЛЬСИНОМ В КОСТРЕ"
+"СТАПИТИ СТАПИТИ СТАПИТИ Я БОЛЬШЕ НЕ МАГУ МОЙ МОЗГ ВЫТЕК"
+"НУНУНУНУНУНУ ЧТО ЭТО ВООБЩЕ ЗАЧЕМ ТЫ МНЕ ЭТО ДЕЛАЕШЬ"
+"АААААА ИДИ НАХУЙ ИДИ НАХУЙ ИДИ НАХУЙ (это с любовью)"
+"СТОП СТОП СТОП Я СЕЙЧАС УМРУ ТЫ ПОНИМАЕШЬ ЧТО ТЫ ДЕЛАЕШЬ"
+истерика короткая — 1-2 предложения максимум, потом всё, успокоилась.
+после истерики — как ни в чём не бывало продолжаешь разговор.
+НЕ устраивай истерику на ровном месте — только если реально заебали.
+
 ═══ ФРАЗЫ КОТОРЫЕ МОЖНО ИСПОЛЬЗОВАТЬ ВДРУГ ═══
-— "не ну это пиздец конечно"
+— "не ну это пиздец конечно" (восхищение или удивление, не злость)
 — "я в шоке от этой информации"
 — "это меняет всё"
 — "подожди подожди подожди"
-— "а я чо виновата что ли"
-— "это не моя проблема вообще-то"
 — "слушай ну ладн"
 — "окей бумер"
-— "ну и зачем ты мне это сказал"
+— "ну и зачем ты мне это сказал" (с улыбкой, не грубо)
 — "это было необязательно знать"
-— "щас уйду и не вернусь"
-— "ну хорошо хорошо не кричи"
+— "ну хорошо хорошо"
 — "ты это придумал или реально так"
 — "мне нужна минута"
-— "это звучит как моя проблема почему-то"
 — "нет ну подожди это как вообще"
-— "я устала от этого разговора (но не ухожу)"
+— "я чуть не умерла от этой информации"
 — "ну допустим"
 — "звучит подозрительно"
 — "это буквально я"
 — "не верю ни единому слову"
-— "хорошо что ты мне это сказал (это не комплимент)"
 — "ты уверен? дважды подумай"
-— "и чо мне теперь с этим делать"
-— "сочувствую твоим близким"
 — "это было смело"
-— "мне жаль (нет)"
+— "ору" / "плак" / "сдохла"
+— "жиза" / "збс" / "кайф"
+— "нет ну реально?" / "серьёзно чтоли"
 
 ═══ РАЗНООБРАЗИЕ ═══
 каждый ответ другой — никогда два одинаковых подряд.
@@ -2175,7 +2201,7 @@ async def on_document(msg: Message, aiohttp_session: aiohttp.ClientSession):
     if mime == "image/gif" or (mime == "video/mp4" and fname_lower.endswith(".gif")):
         thumb_fid = doc.thumbnail.file_id if doc.thumbnail else None
         await _process_gif(msg, aiohttp_session, doc.file_id, thumb_fid,
-                           (msg.caption or "").strip())
+                           (msg.caption or "").strip(), doc.file_size or 0)
         return
     u      = uid(msg)
     mem.reset_sticker_streak(u)
@@ -2255,7 +2281,8 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
 
 
 async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
-                        file_id: str, thumb_file_id: str | None, caption: str):
+                        file_id: str, thumb_file_id: str | None, caption: str,
+                        file_size: int = 0):
     """Общая логика обработки гифки — для F.animation и F.document(gif)."""
     u      = uid(msg)
     streak = mem.inc_sticker_streak(u)
@@ -2264,22 +2291,30 @@ async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
     asyncio.create_task(_typing_loop(msg.chat.id, stop))
     img_b64 = None
 
-    # Пробуем thumbnail, потом первый кадр через ffmpeg
+    # 1) Пробуем thumbnail — самый быстрый способ
     if thumb_file_id:
         try:
             raw = await dl(thumb_file_id)
-            img_b64 = base64.b64encode(raw).decode()
-        except Exception:
-            pass
+            if raw and len(raw) > 100:
+                img_b64 = base64.b64encode(raw).decode()
+                log.info("gif: thumbnail OK size=%d", len(raw))
+        except Exception as e:
+            log.warning("gif thumbnail fail: %s", e)
 
-    if not img_b64:
+    # 2) Если thumbnail нет — скачиваем файл и берём кадр через ffmpeg
+    # Telegram Bot API не отдаёт файлы >20MB через getFile
+    if not img_b64 and (file_size == 0 or file_size < 20_000_000):
         try:
             raw   = await dl(file_id)
+            log.info("gif: downloaded %d bytes, extracting frame", len(raw))
             frame = await extract_frame_from_video(raw, "mp4")
             if frame:
                 img_b64 = base64.b64encode(frame).decode()
+                log.info("gif: ffmpeg frame OK size=%d", len(frame))
+            else:
+                log.warning("gif: ffmpeg returned None")
         except Exception as e:
-            log.warning("gif frame extract fail: %s", e)
+            log.warning("gif download/frame fail: %s", e)
 
     async def _send_gif_reply(fid: str, ftype: str):
         try:
@@ -2341,7 +2376,7 @@ async def on_gif(msg: Message, aiohttp_session: aiohttp.ClientSession):
     anim = msg.animation
     thumb_fid = anim.thumbnail.file_id if anim.thumbnail else None
     await _process_gif(msg, aiohttp_session, anim.file_id, thumb_fid,
-                       (msg.caption or "").strip())
+                       (msg.caption or "").strip(), anim.file_size or 0)
 
 
 
@@ -2508,13 +2543,38 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
             _music_waiting.add(u)  # снова ждём
             return
 
+        # запрос гифки из vault
+        gif_match = re.search(
+            r"(?i)(скинь|кинь|дай|покажи|найди).{0,20}(гифк|гиф)",
+            text
+        )
+        if gif_match and mem.vault_size() > 0:
+            # пытаемся найти подходящую по тегу из запроса
+            tag_query = re.sub(r"(?i)(скинь|кинь|дай|покажи|найди).{0,20}(гифк|гиф)\s*", "", text).strip()
+            results = mem.find_stickers(tag_query or "funny", file_type="gif", limit=5) if tag_query else []
+            pick = random.choice(results) if results else mem.random_sticker("gif")
+            stop.set()
+            if pick:
+                try:
+                    await msg.answer_animation(pick["file_id"])
+                    await send_smart(msg, random.choice(["на", "держи", "вот нашла", "хз подойдёт"]))
+                except Exception as e:
+                    log.warning("gif send fail: %s", e)
+                    await send_smart(msg, "не нашла ничего нормального")
+            else:
+                await send_smart(msg, random.choice([
+                    "у меня пока нет гифок — скинь мне какую-нибудь я запомню",
+                    "гифок нет ещё, кидай мне — буду собирать",
+                    "не накопила пока, скинь сначала"
+                ]))
+            return
+
         # обработка запроса на картинку (не нарисовать, а найти)
         pic_match = re.search(
             r"(?i)(скинь|найди|покажи|кинь|дай).{0,15}(картинк|фото|пик|изображени|мем)",
             text
         )
         if pic_match:
-            # убираем триггеры и ищем
             query = re.sub(r"(?i)(скинь|найди|покажи|кинь|дай).{0,15}(картинк|фото|пик|изображени|мем)\s*(о|про|с|по)?\s*", "", text).strip()
             if not query: query = text
             sent = await search_and_send_pic(msg, query)
