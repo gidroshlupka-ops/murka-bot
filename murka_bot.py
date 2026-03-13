@@ -128,7 +128,7 @@ class Secrets:
         "?width=1024&height=1024&nologo=true&enhance=true&model=flux"
     )
     MODEL_CHAT:    str = "google/gemini-2.5-flash-lite"
-    MODEL_VISION:  str = "google/gemini-2.5-flash"
+    MODEL_VISION:  str = "google/gemini-2.5-flash-lite"  # flash даёт только 20 RPD, lite — 1000 RPD
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
     # OR fallback список — пробуем по очереди
     OR_FALLBACK_MODELS: list[str] = [
@@ -180,6 +180,15 @@ class KeyManager:
         self._last_used: dict[int, float] = {}
         self._err_count: dict[int, int]   = {}
         self._type_idx: dict[str, int] = {"chat": 0, "vision": 0, "transcribe": 0}
+        # Группы ключей — ключи с одинаковым префиксом (первые 8 символов)
+        # принадлежат одному аккаунту и банятся вместе при RPD
+        self._groups: dict[str, list[int]] = {}
+        for i, k in enumerate(self._pool):
+            grp = k[:8]
+            self._groups.setdefault(grp, []).append(i)
+        if len(self._groups) < len(self._pool):
+            log.info("KeyManager: %d ключей в %d группах (аккаунтах)",
+                     len(self._pool), len(self._groups))
         self._init_ban_db()
         self._load_bans()
         if not self._pool:
@@ -248,20 +257,35 @@ class KeyManager:
         )
         if is_rpd:
             cd = float(self.COOLDOWN_RPD)
-            log.warning("Ключ #%d → RPD-лимит, бан на 24ч", idx)
+            # При RPD — баним всю группу (все ключи одного аккаунта)
+            # т.к. Google считает квоту на аккаунт, не на ключ/проект
+            grp_key = self._pool[idx][:8] if idx < len(self._pool) else ""
+            group_idxs = self._groups.get(grp_key, [idx])
+            if len(group_idxs) > 1:
+                log.warning("Ключ #%d → RPD, баним всю группу %s (%d ключей) на 24ч",
+                            idx, grp_key, len(group_idxs))
+            else:
+                log.warning("Ключ #%d → RPD-лимит, бан на 24ч", idx)
+            new_cd_end = time.monotonic() + cd
+            for gidx in group_idxs:
+                if self._cooldown.get(gidx, 0) < new_cd_end:
+                    self._cooldown[gidx] = new_cd_end
+                    self._save_ban(gidx, cd)
         else:
             cd = float(self.COOLDOWN_RPM)
             log.info("Ключ #%d → RPM 429-бан на 65с", idx)
-        new_cd_end = time.monotonic() + cd
-        if self._cooldown.get(idx, 0) >= new_cd_end:
-            log.info("Ключ #%d уже в более длинном бане, пропускаем", idx)
-            return
-        self._cooldown[idx] = new_cd_end
-        self._save_ban(idx, cd)
+            new_cd_end = time.monotonic() + cd
+            if self._cooldown.get(idx, 0) >= new_cd_end:
+                log.info("Ключ #%d уже в более длинном бане, пропускаем", idx)
+                return
+            self._cooldown[idx] = new_cd_end
+            self._save_ban(idx, cd)
 
     def mark_used(self, idx: int):
         self._last_used[idx] = time.monotonic()
         self._err_count[idx] = 0
+        if idx < len(self._pool):
+            _grp_inc(self._pool[idx][:8])
 
     def mark_error(self, idx: int):
         self._err_count[idx] = self._err_count.get(idx, 0) + 1
@@ -275,15 +299,17 @@ class KeyManager:
             return -1, ""
         n = len(self._pool)
         start = self._type_idx.get(req_type, 0) % n
-        # Текущий свободен — берём его
-        if not self._is_banned(start):
-            return start, self._pool[start]
-        # Текущий забанен — ищем следующий свободный по кругу и сразу
-        # сохраняем как новый стартовый, чтобы следующий вызов не начинал
-        # снова с того же забаненного индекса
-        for offset in range(1, n):
-            candidate = (start + offset) % n
-            if not self._is_banned(candidate):
+
+        # Проходим все ключи — сначала не забаненные и не превысившие лимит
+        # потом не забаненные (даже если превысили лимит — лучше чем ничего)
+        for pass_num in range(2):
+            for offset in range(n):
+                candidate = (start + offset) % n
+                if self._is_banned(candidate):
+                    continue
+                grp = self._pool[candidate][:8]
+                if pass_num == 0 and _grp_soft_limited(grp):
+                    continue  # в первом проходе пропускаем перегретые группы
                 self._type_idx[req_type] = candidate
                 return candidate, self._pool[candidate]
         return -1, ""
@@ -318,6 +344,34 @@ class KeyManager:
 
 _keys = KeyManager(Secrets.GEMINI_POOL)
 _gemini_last_request: float = 0.0
+
+# ── Дневной счётчик запросов на группу ────────────────────────────────────────
+# Предотвращает сжигание всей квоты одним пиком. При free tier ~1000 RPD/проект
+# на flash-lite, делим поровну между группами.
+_grp_day_count:  dict[str, int]   = {}  # prefix -> кол-во запросов сегодня
+_grp_day_reset:  dict[str, float] = {}  # prefix -> ts сброса (следующая полночь PT)
+_GRP_DAILY_SOFT_LIMIT = 900  # мягкий лимит — выше него переключаемся на след. группу
+
+
+def _grp_soft_limited(grp_prefix: str) -> bool:
+    """True если группа превысила мягкий суточный лимит."""
+    now = time.time()
+    reset_ts = _grp_day_reset.get(grp_prefix, 0)
+    if now >= reset_ts:
+        # Сброс в полночь PT (UTC-8)
+        import datetime
+        tomorrow = datetime.datetime.utcnow().replace(
+            hour=8, minute=0, second=0, microsecond=0)  # полночь PT = 8:00 UTC
+        if datetime.datetime.utcnow().hour >= 8:
+            tomorrow = tomorrow + datetime.timedelta(days=1)
+        _grp_day_reset[grp_prefix] = tomorrow.timestamp()
+        _grp_day_count[grp_prefix] = 0
+    return _grp_day_count.get(grp_prefix, 0) >= _GRP_DAILY_SOFT_LIMIT
+
+
+def _grp_inc(grp_prefix: str):
+    """Увеличивает счётчик запросов группы."""
+    _grp_day_count[grp_prefix] = _grp_day_count.get(grp_prefix, 0) + 1
 _gemini_lock = None
 
 
