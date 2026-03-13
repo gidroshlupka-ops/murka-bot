@@ -132,13 +132,14 @@ class Secrets:
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
     # OR fallback список — пробуем по очереди
     OR_FALLBACK_MODELS: list[str] = [
+        "google/gemma-3-27b-it:free",
         "meta-llama/llama-3.3-70b-instruct:free",
         "mistralai/mistral-small-3.1-24b-instruct:free",
-        "deepseek/deepseek-r1:free",
-        "google/gemma-3-27b-it:free",
-        "meta-llama/llama-3.1-8b-instruct:free",
+        "qwen/qwen3-8b:free",
+        "microsoft/phi-4-reasoning-plus:free",
+        "tngtech/deepseek-r1t-chimera:free",
     ]
-    MODEL_FALLBACK_OR: str = "meta-llama/llama-3.3-70b-instruct:free"
+    MODEL_FALLBACK_OR: str = "google/gemma-3-27b-it:free"
     # HF Space для RVC
     HF_SPACE_BASE: str = os.environ.get(
         "HF_SPACE_URL", "https://wqyuetasdasd-murka-rvc-inference.hf.space"
@@ -3434,6 +3435,9 @@ _YT_RE = re.compile(
     re.I
 )
 
+# TikTok photo/carousel посты — cobalt их не качает, обрабатываем отдельно
+_TT_PHOTO_RE = re.compile(r"tiktok\.com/.*/photo/", re.I)
+
 
 async def _yt_get_meta(session: aiohttp.ClientSession, url: str) -> dict:
     """Получает title + description через oEmbed (YouTube) или страницу (TikTok)."""
@@ -3501,73 +3505,91 @@ async def _cobalt_download_audio(session: aiohttp.ClientSession, url: str) -> by
 async def handle_video_link(msg: Message, url: str,
                              session: aiohttp.ClientSession, extra_text: str = "") -> bool:
     """Обрабатывает ссылку на YouTube/TikTok.
-    Сначала пробует транскрипт, если не вышло — реагирует на метаданные.
-    Возвращает True если успешно обработано."""
+    Сначала пробует транскрипт, если не вышло — реагирует на метаданные."""
     u = uid(msg)
     site = "TikTok" if "tiktok" in url.lower() else "YouTube"
+    is_tt_photo = bool(_TT_PHOTO_RE.search(url))
 
-    # Параллельно стартуем скачивание и получение мета
+    # Сразу шлём статус — юзер видит что мурка занята
+    status_variants = [
+        "щас гляну", "секунду", "смотрю...", "щас заценю",
+        "ок подожди", "гружу...",
+    ]
+    status_msg = await msg.answer(random.choice(status_variants))
+
     meta_task = asyncio.create_task(_yt_get_meta(session, url))
-    audio_task = asyncio.create_task(_cobalt_download_audio(session, url))
-
-    meta = await meta_task
-    title = meta.get("title", "")
-    author = meta.get("author", "")
-
-    # Ждём аудио (но не дольше 45 сек)
-    audio_bytes = None
-    try:
-        audio_bytes = await asyncio.wait_for(asyncio.shield(audio_task), timeout=45)
-    except asyncio.TimeoutError:
-        log.info("cobalt audio timeout для %s", url)
-        audio_task.cancel()
-    except Exception as e:
-        log.warning("cobalt audio error: %s", e)
 
     transcript = ""
-    if audio_bytes:
+    audio_bytes = None
+
+    if not is_tt_photo:
+        # Для видео — качаем аудио параллельно с мета
+        audio_task = asyncio.create_task(_cobalt_download_audio(session, url))
+        meta = await meta_task
         try:
-            transcript = await ai_transcribe(session, audio_bytes, "audio.ogg")
+            audio_bytes = await asyncio.wait_for(asyncio.shield(audio_task), timeout=40)
+        except asyncio.TimeoutError:
+            log.info("cobalt timeout %s", url)
+            audio_task.cancel()
         except Exception as e:
-            log.warning("yt transcribe fail: %s", e)
+            log.warning("cobalt error: %s", e)
+
+        if audio_bytes:
+            try:
+                transcript = await ai_transcribe(session, audio_bytes, "audio.ogg")
+            except Exception as e:
+                log.warning("yt transcribe fail: %s", e)
+    else:
+        # TikTok фото-пост — cobalt не поддерживает, просто берём мета
+        meta = await meta_task
+
+    title  = meta.get("title", "")
+    author = meta.get("author", "")
 
     # Строим промпт
     if transcript and len(transcript.strip()) > 20:
-        # Есть транскрипт — мурка реально "посмотрела" видео
         parts = []
-        if title:
-            parts.append(f"название: «{title}»")
-        if author:
-            parts.append(f"автор: {author}")
+        if title:  parts.append(f"название: {title}")
+        if author: parts.append(f"автор: {author}")
         ctx = ", ".join(parts)
         prompt = (
             f"тебе прислали ссылку на {site}{f' ({ctx})' if ctx else ''}. "
-            f"ты посмотрела и послушала видео. вот что там говорится: «{transcript[:1500]}». "
-            + (f"юзер написал к ней: «{extra_text}». " if extra_text else "")
-            + "отреагируй в своём стиле — скажи что думаешь о видео, что зацепило или нет."
+            f"ты посмотрела видео и послушала. в нём говорится: {transcript[:1500]}. "
+            + (f"юзер написал к ней: {extra_text}. " if extra_text else "")
+            + "отреагируй в своём стиле — скажи что думаешь, что зацепило или нет."
         )
     elif title:
-        # Только метаданные
         prompt = (
             f"тебе прислали ссылку на {site}. "
-            f"название видео: «{title}»"
+            f"название: {title}"
             + (f", автор: {author}" if author else "")
-            + (f". юзер написал: «{extra_text}»" if extra_text else "")
-            + ". отреагируй в своём стиле — как будто посмотрела по названию что это такое."
+            + (f". юзер написал: {extra_text}" if extra_text else "")
+            + ". отреагируй в своём стиле — как будто посмотрела что это такое."
+        )
+    elif is_tt_photo:
+        prompt = (
+            f"тебе прислали тикток с фотографиями"
+            + (f". юзер написал: {extra_text}" if extra_text else "")
+            + ". отреагируй коротко в своём стиле."
         )
     else:
-        # Совсем ничего нет
         prompt = (
             f"тебе прислали ссылку на {site}"
-            + (f". юзер написал: «{extra_text}»" if extra_text else "")
+            + (f". юзер написал: {extra_text}" if extra_text else "")
             + ". отреагируй коротко в своём стиле."
         )
 
     mem.reset_sticker_streak(u)
     answer = await ai_chat(session, u, prompt)
     answer = await maybe_send_sticker(msg, answer)
+
+    # Удаляем статус и отправляем реальный ответ
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
     await send_smart(msg, answer)
-    log.info("handle_video_link OK site=%s transcript_len=%d", site, len(transcript))
+    log.info("handle_video_link OK site=%s transcript_len=%d photo=%s", site, len(transcript), is_tt_photo)
     return True
 
 
