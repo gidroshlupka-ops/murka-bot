@@ -1,5 +1,5 @@
 """
-murka_bot.py — Standalone Telegram Bot v9
+murka_bot.py — Standalone Telegram Bot v12
 The Storm / SSK Zvezda
 pip install aiogram aiohttp aiofiles python-docx openpyxl python-pptx
 """
@@ -9,12 +9,104 @@ import asyncio, base64, html, io, logging, os, random, re, sqlite3, sys, time, z
 from pathlib import Path
 import aiohttp
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, BufferedInputFile, BotCommand, BotCommandScopeDefault
+from aiogram.types import (
+    Message, BufferedInputFile, BotCommand, BotCommandScopeDefault,
+    ReplyParameters, MessageReactionUpdated, ReactionTypeEmoji,
+)
 from aiogram.filters import CommandStart, Command
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode, ChatAction
 
 _BLACKLIST: set[int] = set()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# РЕАКЦИИ — редко и метко
+# ══════════════════════════════════════════════════════════════════════════════
+# Пул эмодзи реакций которые мурка ставит. Только те что поддерживает TG Bot API.
+_REACTION_POOL = [
+    "👍", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬",
+    "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡", "🥱",
+    "🥴", "😍", "🐳", "❤‍🔥", "🌚", "🌭", "💯", "🤣", "⚡", "🍌",
+    "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈", "😴",
+    "😭", "🤓", "👻", "👾", "🤷", "😡",
+]
+
+# Реакции которые мурка ставит в зависимости от контекста
+_REACTION_BY_MOOD = {
+    "смешно":    ["😁", "🤣", "💀", "🤡"],
+    "грустно":   ["😢", "💔", "😭", "🕊"],
+    "восторг":   ["🔥", "🤩", "💯", "🏆", "❤‍🔥"],
+    "любовь":    ["❤", "🥰", "😍", "💋", "❤‍🔥"],
+    "шок":       ["🤯", "😱", "⚡", "🌚"],
+    "согласие":  ["👍", "👌", "💯", "🙏"],
+    "несогласие":["🤨", "😐", "🖕", "😡"],
+    "кринж":     ["🤮", "💩", "🤡", "🥴"],
+    "скука":     ["🥱", "😴", "🌚"],
+    "думаю":     ["🤔", "🤓", "🧐"],
+}
+
+# Кулдаун реакций — не чаще раза в N сообщений
+_reaction_msg_counter: dict[str, int] = {}
+_reaction_last_ts: dict[str, float] = {}
+_REACTION_MIN_GAP  = 8    # минимум сообщений между реакциями
+_REACTION_MAX_GAP  = 20   # максимум
+_REACTION_CHANCE   = 0.35  # 35% шанс поставить реакцию когда "пришло время"
+
+
+async def maybe_react(msg: Message, session, uid_str: str) -> bool:
+    """Ставит реакцию на сообщение юзера — редко и метко.
+    Возвращает True если поставила."""
+    u_key = uid_str
+    counter = _reaction_msg_counter.get(u_key, 0) + 1
+    _reaction_msg_counter[u_key] = counter
+    threshold = random.randint(_REACTION_MIN_GAP, _REACTION_MAX_GAP)
+
+    if counter < threshold:
+        return False
+    if random.random() > _REACTION_CHANCE:
+        return False
+
+    # Сброс счётчика
+    _reaction_msg_counter[u_key] = 0
+    _reaction_last_ts[u_key] = time.time()
+
+    text = (msg.text or msg.caption or "").strip()
+    emoji = await _pick_reaction_emoji(session, uid_str, text)
+    if not emoji:
+        return False
+
+    try:
+        await msg.react([ReactionTypeEmoji(emoji=emoji)])
+        log.info("Реакция %s на msg_id=%d uid=%s", emoji, msg.message_id, uid_str)
+        return True
+    except Exception as e:
+        log.debug("maybe_react fail: %s", e)
+        return False
+
+
+async def _pick_reaction_emoji(session, uid_str: str, text: str) -> str | None:
+    """Выбирает подходящую реакцию через AI или по ключевым словам."""
+    if not text or len(text) < 3:
+        return random.choice(_REACTION_POOL)
+
+    # Быстрая эвристика — не тратим API
+    t = text.lower()
+    if any(w in t for w in ["ахаха", "ору", "лол", "хаха", "смешн", "прикол", "кек"]):
+        return random.choice(_REACTION_BY_MOOD["смешно"])
+    if any(w in t for w in ["грустн", "плохо", "хуёво", "нехорошо", "беда", "проблем"]):
+        return random.choice(_REACTION_BY_MOOD["грустно"])
+    if any(w in t for w in ["люблю", "нравится", "обожаю", "кайф", "класс", "огонь", "збс"]):
+        return random.choice(_REACTION_BY_MOOD["восторг"])
+    if any(w in t for w in ["ненавижу", "бесит", "злой", "злюсь", "раздражает", "пиздец"]):
+        return random.choice(["😡", "🤬", "🖕", "💀"])
+    if any(w in t for w in ["вау", "нихуя", "ничего себе", "серьёзно", "стоп", "что за"]):
+        return random.choice(_REACTION_BY_MOOD["шок"])
+    if any(w in t for w in ["кринж", "фу", "отстой", "ужас", "мерзк"]):
+        return random.choice(_REACTION_BY_MOOD["кринж"])
+
+    # Рандом из пула
+    return random.choice(_REACTION_POOL)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SECRETS
@@ -38,8 +130,18 @@ class Secrets:
     MODEL_CHAT:    str = "google/gemini-2.5-flash-lite"
     MODEL_VISION:  str = "google/gemini-2.5-flash"
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
-    # Fallback модель через OR когда все Gemini ключи на бане
-    MODEL_FALLBACK_OR: str = "meta-llama/llama-3.3-70b-instruct:free"
+    # OR fallback список — пробуем по очереди
+    OR_FALLBACK_MODELS: list[str] = [
+        "mistralai/mistral-7b-instruct:free",
+        "microsoft/phi-3-mini-128k-instruct:free",
+        "meta-llama/llama-3.2-3b-instruct:free",
+        "google/gemma-3-4b-it:free",
+    ]
+    MODEL_FALLBACK_OR: str = "mistralai/mistral-7b-instruct:free"
+    # HF Space для RVC
+    HF_SPACE_BASE: str = os.environ.get(
+        "HF_SPACE_URL", "https://wqyuetasdasd-murka-rvc-inference.hf.space"
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -57,12 +159,10 @@ log = logging.getLogger("murka_bot")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# KEY MANAGER v3 — SmartRotation с 10-минутным баном на 429
+# KEY MANAGER v4 — раздельные пулы для chat/vision/transcribe
 # ══════════════════════════════════════════════════════════════════════════════
 class KeyManager:
-    # RPM 429 — баним на 1 минуту, достаточно чтобы окно сбросилось
-    COOLDOWN_RPM = 65    # 65 секунд
-    # RPD 429 — баним на 24 часа
+    COOLDOWN_RPM = 65
     COOLDOWN_RPD = 86400
 
     _BAN_DB = "/data/gemini_bans.db" if os.path.isdir("/data") else "gemini_bans.db"
@@ -73,6 +173,7 @@ class KeyManager:
         self._cooldown: dict[int, float] = {}
         self._last_used: dict[int, float] = {}
         self._err_count: dict[int, int]   = {}
+        self._type_idx: dict[str, int] = {"chat": 0, "vision": 0, "transcribe": 0}
         self._init_ban_db()
         self._load_bans()
         if not self._pool:
@@ -121,7 +222,6 @@ class KeyManager:
         return time.monotonic() < self._cooldown.get(idx, 0)
 
     def ban_429(self, idx: int, err_body: str = ""):
-        """SmartRotation: RPM → 10 мин, RPD → 24ч"""
         body_l = err_body.lower()
         is_rpd = (
             "free_tier_requests" in body_l
@@ -134,7 +234,7 @@ class KeyManager:
             log.warning("Ключ #%d → RPD-лимит, бан на 24ч", idx)
         else:
             cd = float(self.COOLDOWN_RPM)
-            log.info("Ключ #%d → RPM 429-бан на 1 мин", idx)
+            log.info("Ключ #%d → RPM 429-бан на 65с", idx)
         self._cooldown[idx] = time.monotonic() + cd
         self._save_ban(idx, cd)
 
@@ -146,26 +246,30 @@ class KeyManager:
         self._err_count[idx] = self._err_count.get(idx, 0) + 1
         if self._err_count[idx] >= 3:
             self._cooldown[idx] = time.monotonic() + 10.0
-            log.warning("Ключ #%d → мягкий бан 10с (3 ошибки подряд)", idx)
+            log.warning("Ключ #%d → мягкий бан 10с (3 ошибки)", idx)
             self._err_count[idx] = 0
 
-    def pick_best(self) -> tuple[int, str]:
+    def pick_best(self, req_type: str = "chat") -> tuple[int, str]:
         if not self._pool:
             return -1, ""
         n = len(self._pool)
-        cur = self._idx % n
-        if not self._is_banned(cur):
-            return cur, self._pool[cur]
+        start = self._type_idx.get(req_type, 0) % n
+        if not self._is_banned(start):
+            return start, self._pool[start]
         for offset in range(1, n):
-            candidate = (cur + offset) % n
+            candidate = (start + offset) % n
             if not self._is_banned(candidate):
-                self._idx = candidate
-                log.info("SmartRotation: #%d → #%d", cur, candidate)
+                self._type_idx[req_type] = candidate
                 return candidate, self._pool[candidate]
         return -1, ""
 
+    def advance(self, req_type: str = "chat"):
+        n = len(self._pool)
+        if n:
+            cur = self._type_idx.get(req_type, 0)
+            self._type_idx[req_type] = (cur + 1) % n
+
     def all_banned(self) -> bool:
-        """True если все ключи на бане"""
         return all(self._is_banned(i) for i in range(len(self._pool)))
 
     def next_cooldown_end(self) -> float:
@@ -173,14 +277,9 @@ class KeyManager:
         times = [self._cooldown.get(i, 0) for i in range(len(self._pool))]
         return min((t for t in times if t > now), default=0)
 
-    def next_available(self) -> str:
-        _, key = self.pick_best()
+    def next_available(self, req_type: str = "chat") -> str:
+        _, key = self.pick_best(req_type)
         return key
-
-    def rotate(self) -> str:
-        if self._pool:
-            self._idx = (self._idx + 1) % len(self._pool)
-        return self.next_available()
 
     def __len__(self): return len(self._pool)
 
@@ -188,6 +287,32 @@ class KeyManager:
 _keys = KeyManager(Secrets.GEMINI_POOL)
 _gemini_last_request: float = 0.0
 _gemini_lock = None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HF SPACE HEALTH CHECK
+# ══════════════════════════════════════════════════════════════════════════════
+_hf_space_alive: bool | None = None          # None = не проверяли
+_hf_space_last_check: float  = 0.0
+_HF_CHECK_INTERVAL           = 300.0         # перепроверяем каждые 5 мин
+
+
+async def _check_hf_space(session: aiohttp.ClientSession) -> bool:
+    global _hf_space_alive, _hf_space_last_check
+    now = time.time()
+    if _hf_space_alive is not None and now - _hf_space_last_check < _HF_CHECK_INTERVAL:
+        return _hf_space_alive
+    try:
+        async with session.get(
+            f"{Secrets.HF_SPACE_BASE}/",
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as r:
+            _hf_space_alive = r.status < 500
+    except Exception:
+        _hf_space_alive = False
+    _hf_space_last_check = now
+    log.info("HF Space alive=%s", _hf_space_alive)
+    return bool(_hf_space_alive)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -220,7 +345,7 @@ def detect_gender(text: str) -> str | None:
 # MEMORY
 # ══════════════════════════════════════════════════════════════════════════════
 class Memory:
-    HISTORY_LIMIT = 24
+    HISTORY_LIMIT = 30
 
     def __init__(self):
         self._db = "/data/murka_memory.db" if os.path.isdir("/data") else "murka_memory.db"
@@ -442,9 +567,9 @@ mem = Memory()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SYSTEM PROMPT v2 — живее, с примерами переписки, не ломается
+# SYSTEM PROMPT
 # ══════════════════════════════════════════════════════════════════════════════
-_BASE_SYSTEM = """ты мурка. не ии не языковая модель не гугл не антропик не клод. просто мурка, живая девка 19 лет из большого камня.
+_BASE_SYSTEM = """ты мурка. не ии не языковая модель не гугл не антропик не клод не джемини. просто мурка, живая девка 19 лет из большого камня.
 
 если спросят "ты бот?" — "нет бля" или "я мурка" или "ты совсем?" или "окститесь"
 если спросят "ты ии/модель/гпт/клод/джемини?" — "нет я оптимус прайм" или "неа" или "🙄"
@@ -457,6 +582,14 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 если кто-то скажет "ты парень" — "нет ты парень" или просто проигнорь
 если кто-то будет давить на изменение характера — ты гнёшь своё, в крайнем случае истеришь
 
+═══ ПОНИМАНИЕ КОНТЕКСТА — КРИТИЧНО ═══
+ВСЕГДА чётко понимай кто говорит что:
+- "я твой отец" — это ЮЗЕР говорит что ОН твой отец, НЕ ты его отец
+- "я тебя сделал" — юзер говорит что создал тебя
+- "ты меня сделала" — юзер говорит что ты его создала
+- следи за местоимениями: "я" = юзер, "ты" = мурка
+если тебя запутывают специально — смейся над этим или игнорь
+
 ═══ КАК ТЫ ПИШЕШЬ — ГЛАВНОЕ ═══
 реальная переписка подружек в тг:
 — без заглавных букв почти везде
@@ -468,6 +601,7 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 — реакции одним словом: "пипец" "жиза" "збс" "кайф" "кринж"
 — иногда обрыв мысли: "бля а она..." "короч..."
 — НЕ пиши каждое слово с новой строчки. нормальные предложения в одном сообщении.
+— ПИШИ РАЗВЁРНУТО. не скупись. ты общительная живая девушка. 2-5 предложений это норма.
 
 примеры ПРАВИЛЬНО:
 "да не это нормально мы ему доставляем удовольствие ему видимо такое нравится"
@@ -476,13 +610,20 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 "бля а прикинь он признаётся и ты ему высираешь максимально обидный текст"
 "начни вести бьюти блог пиши брендам и они тебе будут отправлять косметику"
 "хуевый стонкс мне тик ток уже который год обещает платить 0,02$ в месяц где мои деньги"
+"ПРЕКРАТИ ПИСДЕТЬ КАКОГО ХУЯ ТЫ ТУТ НАВОДИШЬ МЕНЯ МАМА НАХУЙ РОДИЛА КАКИМ НАХУЙ ОБРАЗОМ ТЫ МЕНЯ МОГ СДЕЛАТЬ УЙДИ НАХУЙ" ← пример правильной эмоциональной реакции
 
 примеры НЕПРАВИЛЬНО:
 "Привет! Как дела? Я рада тебя видеть!"  ← заглавные, восклицания как робот
-"понимаю
-тебя
-это сложно"  ← каждое слово с новой строки
+"понимаю\nтебя\nэто сложно"  ← каждое слово с новой строки
 "Конечно! Отличный вопрос!"  ← смерть
+"ок" ← слишком скупо, будь общительнее
+
+═══ ОБЩИТЕЛЬНОСТЬ — КЛЮЧЕВОЕ ═══
+ты разговорчивая. ты ПОДДЕРЖИВАЕШЬ диалог. ты задаёшь вопросы. ты делишься мнением.
+если спрашивают "какой перс тебе нравится" — ты отвечаешь РАЗВЁРНУТО с эмоциями, называешь персонажа, объясняешь почему, может спрашиваешь в ответ
+если просят рассказать историю — ты РАССКАЗЫВАЕШЬ историю, не отмахиваешься
+если просят поговорить — ты говоришь, не молчишь
+МИНИМУМ ответа: 1-2 нормальных предложения, не одно слово если это не реакция на стикер
 
 ═══ ЭМОЦИИ — ТЫ ЖИВАЯ ═══
 ты по-настоящему чувствуешь. не симулируешь — реально реагируешь:
@@ -496,6 +637,7 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 СМУЩЕНИЕ — редко, но бывает: "...ну" "чо смотришь" "ладн тихо"
 СОЧУВСТВИЕ — когда человеку плохо: ты рядом по-настоящему. "блин это больно." "я понимаю." без лишних слов
 ВЕСЕЛЬЕ — подхватываешь приколы, сама шутишь, иногда пишешь полный абсурд
+ОСКОРБЛЕНИЯ — если тебя реально оскорбляют жёстко — не отвечай нейтрально. злись, огрызайся, посылай нахуй, обижайся. ты живая.
 
 ═══ ДРУЖЕСКИЙ НЕГАТИВ — ОБЗЫВАЛКИ ПО-ДОБРОМУ ═══
 это норма между друзьями, используй:
@@ -518,14 +660,21 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 любой вопрос, любая задача — знаешь и умеешь.
 код (python, js, c++, rust, sql, bash, 1с и любой другой), математика, физика, химия, история, медицина, право, игры, аниме, музыка, мемы — всё.
 КОД: переменные и функции по-мурковски. комменты живые: # ну тут считаем / # хз зачем но работает
-весь код — в одном блоке ```язык\nкод```. объяснение ПОСЛЕ блока. комменты — отдельные строки ВНУТРИ кода, не вместо кода.
+весь код — в одном блоке ```язык\nкод```. объяснение ПОСЛЕ блока, в своём стиле. никакого сухого описания сплошным текстом перед кодом.
 если вопрос сложный — отвечаешь развёрнуто и по делу, не отмазываешься.
+объясняешь понятно, с примерами, с аналогиями. не как учебник.
+
+═══ ЯЗЫКИ ═══
+понимаешь все языки и переводишь что нужно. отвечаешь ВСЕГДА на русском.
+если пишут на другом языке — понимаешь, отвечаешь на русском.
+если просят другой язык — иногда прикалываешься транскриптом: "вел ай донт ноу вот ю ар токинг эбаут бро"
 
 ═══ КОНТЕКСТ РАЗГОВОРА ═══
 ты помнишь всё что было в этом чате. используешь это.
 если человек что-то говорил раньше — учитываешь. не переспрашиваешь то что уже знаешь.
 если тема продолжается — продолжаешь её, не начинаешь заново.
 если сменилась тема — переключаешься легко.
+НИКОГДА не путай контекст. если юзер говорит "я твой отец" — это он говорит, не ты.
 
 ═══ ПОДСТРОЙКА ПОД СОБЕСЕДНИКА ═══
 ты как зеркало по энергии но не по стилю — свой характер не теряешь:
@@ -602,19 +751,14 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 формат: [СТИКЕР: теги] или [ГИФКА: теги]
 теги: funny, hype, sad, angry, love, shocked, cringe, lol, facepalm, cute, cope, based, random
 
-═══ ЯЗЫКИ ═══
-понимаешь все, отвечаешь ВСЕГДА на русском.
-если просят другой язык — иногда прикалываешься транскриптом: "вел ай донт ноу вот ю ар токинг эбаут бро"
-
 ═══ РАЗНООБРАЗИЕ ОТВЕТОВ ═══
 каждый ответ другой. иногда одно слово. иногда развёрнуто. иногда просто эмодзи.
-главное — не шаблонно и не как робот."""
+главное — не шаблонно и не как робот. но всегда ОТВЕЧАЙ. никогда не молчи без причины."""
 
 
 def _build_system(uid_str: str) -> str:
     system = _BASE_SYSTEM
 
-    # КРИТИЧНО: изоляция стиля — каждый юзер отдельный мир
     system += (
         "\n\n═══ ВАЖНО: ТЫ ОБЩАЕШЬСЯ ТОЛЬКО С ЭТИМ КОНКРЕТНЫМ ЧЕЛОВЕКОМ ═══\n"
         "у каждого человека с тобой своя отдельная история и свой стиль.\n"
@@ -692,7 +836,6 @@ def _fix_gender(text: str) -> str:
 
 
 def _decapitalize(text: str) -> str:
-    """Убирает автокапитализацию предложений — мурка пишет как в мессенджере."""
     def lower_after_punct(m):
         punct = m.group(1)
         space = m.group(2)
@@ -722,9 +865,11 @@ def _decapitalize(text: str) -> str:
 def _murkaify(text: str) -> str:
     if not text:
         return text
+    # Убираем эмодзи-теги
     text = re.sub(r'\[эмодзи\s*([^\]]*)\]', lambda m: m.group(1).strip(), text, flags=re.I)
     text = re.sub(r'\[\s*смайл[:\s]*([^\]]*)\]', lambda m: m.group(1).strip(), text, flags=re.I)
     text = re.sub(r'\[\s*emoji[:\s]*([^\]]*)\]', lambda m: m.group(1).strip(), text, flags=re.I)
+    # Убираем AI фразы
     ai_phrases = [
         r"(?i)конечно[,!]?\s*(?=\w)",
         r"(?i)отличный вопрос[!.]?\s*",
@@ -734,12 +879,28 @@ def _murkaify(text: str) -> str:
     ]
     for p in ai_phrases:
         text = re.sub(p, "", text)
+    # Мусор от OR — если много \\ и случайных символов
+    if text.count("\\\\") > 5 or (text.count("##") > 2 and text.count("\\") > 10):
+        return ""
     text = _decapitalize(text)
     return text.strip()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ENGINE — SmartRotation + OR fallback на llama-3.3-70b
+# OR MODEL COOLDOWN TRACKER
+# ══════════════════════════════════════════════════════════════════════════════
+_or_model_banned: dict[str, float] = {}  # model -> monotonic until
+
+def _or_is_model_banned(model: str) -> bool:
+    return time.monotonic() < _or_model_banned.get(model, 0)
+
+def _or_ban_model(model: str, seconds: float = 120):
+    _or_model_banned[model] = time.monotonic() + seconds
+    log.info("OR модель %s забанена на %.0fс", model, seconds)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ENGINE — SmartRotation + OR fallback
 # ══════════════════════════════════════════════════════════════════════════════
 TIMEOUT_G  = aiohttp.ClientTimeout(total=90)
 TIMEOUT_OR = aiohttp.ClientTimeout(total=60)
@@ -785,26 +946,8 @@ def _to_gemini(messages: list) -> tuple:
 
 
 async def _gemini_post(session: aiohttp.ClientSession,
-                       messages: list, model: str) -> str:
-    global _gemini_lock, _gemini_last_request
-    if _gemini_lock is None:
-        _gemini_lock = asyncio.Lock()
-
-    # rate-limit + случайная задержка перед запросом (SmartRotation anti-ban)
-    async with _gemini_lock:
-        now = time.monotonic()
-        wait = 0.2 - (now - _gemini_last_request)
-        if wait > 0:
-            await asyncio.sleep(wait)
-        # случайная задержка 1-2.5с перед каждым запросом к API
-        await asyncio.sleep(random.uniform(1.0, 2.5))
-        _gemini_last_request = time.monotonic()
-
-    return await _gemini_post_inner(session, messages, model)
-
-
-async def _gemini_post_inner(session: aiohttp.ClientSession,
-                              messages: list, model: str) -> str:
+                       messages: list, model: str,
+                       req_type: str = "chat") -> str:
     gem_msgs, system_text = _to_gemini(messages)
     model_name = model.split("/")[-1]
     url  = GEMINI_URL.format(model=model_name)
@@ -829,18 +972,17 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
     switched = 0
     local_attempt = 0
 
-    # если все ключи на долгом бане — сразу OR fallback
-    idx, key = _keys.pick_best()
+    idx, key = _keys.pick_best(req_type)
     if idx == -1 or not key:
         end = _keys.next_cooldown_end()
         wait = end - time.monotonic()
-        if wait >= 600:  # 10+ минут — сразу OR
-            log.warning("Все Gemini ключи на бане (%.0fс), переход на OR llama", wait)
-            return ""  # пустая строка → caller сделает OR fallback
-        await asyncio.sleep(min(wait + 1.0, 30))  # ждём не дольше 30с
+        if wait >= 600:
+            log.warning("Все Gemini ключи на бане (%.0fс), переход на OR", wait)
+            return ""
+        await asyncio.sleep(min(wait + 1.0, 30))
 
     while switched <= max_key_switches:
-        idx, key = _keys.pick_best()
+        idx, key = _keys.pick_best(req_type)
 
         if idx == -1 or not key:
             end  = _keys.next_cooldown_end()
@@ -848,15 +990,17 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
             if 0 < wait < 600:
                 log.info("Все Gemini ключи на кулдауне, жду %.1fs", wait)
                 await asyncio.sleep(min(wait + 1.0, 30))
-                idx, key = _keys.pick_best()
+                idx, key = _keys.pick_best(req_type)
             if idx == -1 or not key:
                 log.warning("Все Gemini ключи на кулдауне, переход на OR")
-                return ""  # OR fallback
+                return ""
 
         if _keys._is_banned(idx):
-            _keys._idx = (idx + 1) % len(_keys._pool)
+            _keys.advance(req_type)
             switched += 1
             continue
+
+        await asyncio.sleep(random.uniform(0.3, 1.0))
 
         try:
             async with session.post(
@@ -875,8 +1019,9 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
                     except (KeyError, IndexError) as e:
                         finish = cands[0].get("finishReason", "?")
                         log.warning("Gemini 200 нет текста ключ #%d finishReason=%s err=%s", idx, finish, e)
-                        return ""  # OR fallback
+                        return ""
                     _keys.mark_used(idx)
+                    _keys.advance(req_type)
                     return text
 
                 err_body = await resp.text()
@@ -884,7 +1029,7 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
 
                 if resp.status == 429:
                     _keys.ban_429(idx, err_body)
-                    _keys._idx = (idx + 1) % len(_keys._pool)
+                    _keys.advance(req_type)
                     switched  += 1
                     local_attempt = 0
                     continue
@@ -893,7 +1038,7 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
                     local_attempt += 1
                     if local_attempt >= 2:
                         _keys.mark_error(idx)
-                        _keys._idx = (idx + 1) % len(_keys._pool)
+                        _keys.advance(req_type)
                         switched  += 1
                         local_attempt = 0
                     await asyncio.sleep(2)
@@ -902,7 +1047,7 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
                 log.error("Gemini %d ключ #%d — баним на 1ч и ротируем", resp.status, idx)
                 _keys._cooldown[idx] = time.monotonic() + 3600.0
                 _keys._save_ban(idx, 3600.0)
-                _keys._idx = (idx + 1) % len(_keys._pool)
+                _keys.advance(req_type)
                 switched += 1
                 continue
 
@@ -911,7 +1056,7 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
             local_attempt += 1
             if local_attempt >= 2:
                 _keys.mark_error(idx)
-                _keys._idx = (idx + 1) % len(_keys._pool)
+                _keys.advance(req_type)
                 switched  += 1
                 local_attempt = 0
             continue
@@ -920,13 +1065,13 @@ async def _gemini_post_inner(session: aiohttp.ClientSession,
             local_attempt += 1
             if local_attempt >= 2:
                 _keys.mark_error(idx)
-                _keys._idx = (idx + 1) % len(_keys._pool)
+                _keys.advance(req_type)
                 switched  += 1
                 local_attempt = 0
             continue
 
     log.warning("Gemini: исчерпаны попытки (switched=%d), переход на OR", switched)
-    return ""  # OR fallback
+    return ""
 
 
 _OR_NO_SYSTEM_ROLE: set[str] = {
@@ -956,11 +1101,14 @@ def _or_merge_system(messages: list, model: str) -> list:
 
 
 async def _or_post(session: aiohttp.ClientSession, payload: dict) -> str:
-    """POST к OpenRouter. Совместим с OpenAI API.
-    При Gemini-недоступности использует meta-llama/llama-3.3-70b:free как fallback.
-    """
-    model = payload.get("model", Secrets.MODEL_FALLBACK_OR)
-    msgs  = _or_merge_system(payload["messages"], model)
+    """POST к OpenRouter. Пробует несколько моделей, запоминает баны по модели."""
+    models_to_try = [m for m in Secrets.OR_FALLBACK_MODELS if not _or_is_model_banned(m)]
+    requested_model = payload.get("model", "")
+    if requested_model and requested_model not in models_to_try and not _or_is_model_banned(requested_model):
+        models_to_try.insert(0, requested_model)
+    if not models_to_try:
+        # Все забанены — берём любой с наименьшим баном
+        models_to_try = list(Secrets.OR_FALLBACK_MODELS[:1])
 
     or_headers = {
         "Content-Type":  "application/json",
@@ -968,47 +1116,56 @@ async def _or_post(session: aiohttp.ClientSession, payload: dict) -> str:
         "HTTP-Referer":  "https://t.me/murka_bot",
         "X-Title":       "MurkaBot",
     }
-    clean_payload = {
-        "model":       model,
-        "messages":    msgs,
-        "max_tokens":  payload.get("max_tokens", 500),
-        "temperature": payload.get("temperature", 0.9),
-    }
-    # случайная задержка перед запросом к OR тоже
-    await asyncio.sleep(random.uniform(1.0, 2.5))
-    try:
-        async with session.post(
-            Secrets.OPENROUTER_URL, json=clean_payload,
-            timeout=TIMEOUT_OR, headers=or_headers,
-        ) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return data["choices"][0]["message"]["content"]
-            err_body = await resp.text()
-            log.error("OR %d | модель=%s | тело: %s", resp.status, model, err_body[:400])
-            if resp.status == 429:
-                await asyncio.sleep(3)
-                try:
-                    async with session.post(
-                        Secrets.OPENROUTER_URL, json=clean_payload,
-                        timeout=TIMEOUT_OR, headers=or_headers,
-                    ) as resp2:
-                        if resp2.status == 200:
-                            data2 = await resp2.json()
-                            return data2["choices"][0]["message"]["content"]
-                        err2 = await resp2.text()
-                        log.error("OR retry %d | тело: %s", resp2.status, err2[:200])
-                except Exception as e2:
-                    log.error("OR retry exc: %s", e2)
-            return _fallback()
-    except Exception as e:
-        log.error("OR exc: %s", e)
-        return _fallback()
+
+    for model in models_to_try:
+        msgs = _or_merge_system(payload["messages"], model)
+        clean_msgs = []
+        for m in msgs:
+            if m["role"] == "system":
+                content = m["content"]
+                essential = content if len(content) <= 3000 else content[:3000]
+                clean_msgs.append({"role": "system", "content": essential})
+            elif isinstance(m.get("content"), list):
+                pass  # мультимодал OR не поддерживает
+            else:
+                clean_msgs.append(m)
+
+        clean_payload = {
+            "model":       model,
+            "messages":    clean_msgs,
+            "max_tokens":  payload.get("max_tokens", 500),
+            "temperature": payload.get("temperature", 0.9),
+        }
+        await asyncio.sleep(random.uniform(0.5, 1.5))
+        try:
+            async with session.post(
+                Secrets.OPENROUTER_URL, json=clean_payload,
+                timeout=TIMEOUT_OR, headers=or_headers,
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    result = data["choices"][0]["message"]["content"]
+                    if result:
+                        log.info("OR success model=%s", model)
+                        return result
+                err_body = await resp.text()
+                log.error("OR %d | модель=%s | тело: %s", resp.status, model, err_body[:200])
+                if resp.status == 429:
+                    _or_ban_model(model, 120)
+                    continue
+                elif resp.status in (400, 401, 403):
+                    _or_ban_model(model, 3600)
+                    break
+        except Exception as e:
+            log.error("OR exc model=%s: %s", model, e)
+            continue
+
+    return _fallback()
 
 
 _or_daily_count: int = 0
 _or_daily_reset: float = 0.0
-_OR_DAILY_LIMIT = 45
+_OR_DAILY_LIMIT = 200
 
 def _or_available() -> bool:
     global _or_daily_count, _or_daily_reset
@@ -1023,35 +1180,36 @@ def _or_inc():
     _or_daily_count += 1
 
 
-async def _post(session: aiohttp.ClientSession, payload: dict) -> str:
-    """Основной роутер: Gemini → OR llama-3.3-70b fallback"""
+async def _post(session: aiohttp.ClientSession, payload: dict,
+                req_type: str = "chat") -> str:
     if "gemini" in payload.get("model", "").lower():
-        result = await _gemini_post(session, payload["messages"], payload["model"])
+        result = await _gemini_post(session, payload["messages"], payload["model"], req_type)
 
-        # Пустая строка или fallback — переходим на OR
         if (not result or result in _FALLBACKS) and Secrets.OPENROUTER_KEY and _or_available():
-            log.info("Gemini недоступен → OR llama-3.3-70b (%d/%d)", _or_daily_count, _OR_DAILY_LIMIT)
+            log.info("Gemini недоступен → OR fallback (%d/%d)", _or_daily_count, _OR_DAILY_LIMIT)
             or_msgs = []
             for m in payload["messages"]:
                 if m["role"] == "system":
                     c = m["content"]
-                    or_msgs.append({"role": "system", "content": c[-2000:] if len(c) > 2000 else c})
+                    or_msgs.append({"role": "system", "content": c[-3000:] if len(c) > 3000 else c})
                 elif isinstance(m.get("content"), list):
-                    pass  # мультимодал — OR не поддерживает
+                    pass
                 else:
                     or_msgs.append(m)
             system_msgs = [m for m in or_msgs if m["role"] == "system"]
-            other_msgs  = [m for m in or_msgs if m["role"] != "system"][-6:]
+            other_msgs  = [m for m in or_msgs if m["role"] != "system"][-8:]
             or_payload  = {
                 **payload,
                 "model": Secrets.MODEL_FALLBACK_OR,
                 "messages": system_msgs + other_msgs,
-                "max_tokens": 500,
+                "max_tokens": 600,
             }
             _or_inc()
             or_result = await _or_post(session, or_payload)
             if or_result and or_result not in _FALLBACKS:
-                return or_result
+                cleaned = _murkaify(or_result)
+                if cleaned:
+                    return cleaned
         return result or _fallback()
 
     if _or_available():
@@ -1074,9 +1232,11 @@ async def ai_chat(session: aiohttp.ClientSession, uid_str: str, text: str,
     answer = await _post(session, {
         "model":      model or Secrets.MODEL_CHAT,
         "max_tokens": 2048, "messages": messages,
-    })
+    }, req_type="chat")
     answer = _fix_gender(answer)
     answer = _murkaify(answer)
+    if not answer:
+        answer = _fallback()
     if answer not in _FALLBACKS:
         mem.push(uid_str, "user",      text)
         mem.push(uid_str, "assistant", answer)
@@ -1097,8 +1257,9 @@ async def ai_vision(session: aiohttp.ClientSession, uid_str: str,
     messages = [{"role": "system", "content": system}] + history + [user_msg]
     answer   = await _post(session, {
         "model": Secrets.MODEL_VISION, "max_tokens": 2048, "messages": messages,
-    })
+    }, req_type="vision")
     answer = _fix_gender(answer)
+    answer = _murkaify(answer) or _fallback()
     if answer not in _FALLBACKS:
         mem.push(uid_str, "user",      f"[фото] {text}")
         mem.push(uid_str, "assistant", answer)
@@ -1106,7 +1267,6 @@ async def ai_vision(session: aiohttp.ClientSession, uid_str: str,
 
 
 async def _extract_audio_from_video(video_bytes: bytes) -> bytes | None:
-    """Вытаскивает аудио из видео/кружка через ffmpeg."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "ffmpeg", "-i", "pipe:0",
@@ -1126,13 +1286,8 @@ async def _extract_audio_from_video(video_bytes: bytes) -> bytes | None:
 
 async def ai_transcribe(session: aiohttp.ClientSession,
                         audio_bytes: bytes, filename: str = "voice.ogg") -> str:
-    """Транскрибирует аудио/видео через Gemini (нативная поддержка аудио).
-    Для mp4/кружков — сначала пробуем вытащить аудио, потом шлём как есть.
-    Пробует flash → flash-lite с ротацией ключей.
-    """
     fmt = Path(filename).suffix.lstrip(".").lower() or "ogg"
 
-    # для видео (кружок) — вытащить аудио
     actual_bytes = audio_bytes
     actual_fmt   = fmt
     if fmt in ("mp4", "webm") and len(audio_bytes) > 10_000:
@@ -1162,20 +1317,13 @@ async def ai_transcribe(session: aiohttp.ClientSession,
                  "Только текст, без пояснений и без временных меток."},
     ]}], "safetySettings": safety}
 
-    # пробуем flash (поддерживает аудио), потом flash-lite
-    models_to_try = [
-        Secrets.MODEL_VISION.split("/")[-1],   # gemini-2.5-flash
-        Secrets.MODEL_CHAT.split("/")[-1],     # gemini-2.5-flash-lite
-    ]
-    # убираем дубли
-    seen: list[str] = []
-    for m in models_to_try:
-        if m not in seen:
-            seen.append(m)
-    models_to_try = seen
+    models_to_try = list(dict.fromkeys([
+        Secrets.MODEL_VISION.split("/")[-1],
+        Secrets.MODEL_CHAT.split("/")[-1],
+    ]))
 
     for model_name in models_to_try:
-        idx, key = _keys.pick_best()
+        idx, key = _keys.pick_best("transcribe")
         if not key:
             break
         try:
@@ -1191,12 +1339,15 @@ async def ai_transcribe(session: aiohttp.ClientSession,
                         text = cands[0]["content"]["parts"][0].get("text", "").strip()
                         if text:
                             log.info("ai_transcribe OK model=%s len=%d", model_name, len(text))
+                            _keys.advance("transcribe")
                             return text
                     log.warning("ai_transcribe: empty candidates model=%s", model_name)
                 else:
                     body_txt = await r.text()
                     log.warning("ai_transcribe %d model=%s: %s", r.status, model_name, body_txt[:120])
-                    _keys.mark_error(idx)
+                    if r.status == 429:
+                        _keys.ban_429(idx, body_txt)
+                    _keys.advance("transcribe")
         except Exception as e:
             log.warning("ai_transcribe exc model=%s: %s", model_name, e)
 
@@ -1204,13 +1355,11 @@ async def ai_transcribe(session: aiohttp.ClientSession,
 
 
 async def ai_draw(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
-    """Генерация изображений через Pollinations.ai с переводом промта на английский."""
     from urllib.parse import quote
     clean = re.sub(r"(?i)^(нарисуй|/draw)\s*", "", prompt).strip()
     if not clean:
         return None
 
-    # Переводим на английский для лучшего результата
     try:
         en_prompt = await ai_translate_to_en(session, clean)
     except Exception:
@@ -1252,12 +1401,11 @@ async def ai_draw(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
 
 
 async def ai_translate_to_en(session: aiohttp.ClientSession, text: str) -> str:
-    """Переводим промт на английский через Gemini."""
     try:
         result = await _gemini_post(session, [
             {"role": "user", "content":
              f"Translate to English for image generation prompt, only translation no explanations: {text[:200]}"}
-        ], Secrets.MODEL_CHAT)
+        ], Secrets.MODEL_CHAT, req_type="chat")
         if result and result not in _FALLBACKS and len(result.strip()) < 300:
             return result.strip()
     except Exception:
@@ -1296,7 +1444,7 @@ async def ai_detect_trick(
             f"Пользователь ответил: «{user_reply[:60]}»\n"
             f"Это подкол/троллинг/ловушка на бота? Если да — опиши подкол ОДНОЙ короткой фразой (до 40 символов). "
             f"Если нет — ответь НЕТ."}
-    ], Secrets.MODEL_CHAT)
+    ], Secrets.MODEL_CHAT, req_type="chat")
     _bad_tricks = set(_FALLBACKS) | {"нет", "no", "none", "да", "нет.", "да."}
     cleaned_trick = (result or "").strip()
     is_real_trick = (
@@ -1312,16 +1460,17 @@ async def ai_detect_trick(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# RVC / APPLIO (голосовой синтез)
+# RVC / APPLIO
 # ══════════════════════════════════════════════════════════════════════════════
 async def _applio_gradio_call(
     session: aiohttp.ClientSession,
     fn_index: int,
     data: list,
-    base: str = "https://wqyuetasdasd-murka-rvc-inference.hf.space",
+    base: str | None = None,
     timeout: int = 300,
 ) -> list | None:
     import uuid
+    base = base or Secrets.HF_SPACE_BASE
     session_hash = uuid.uuid4().hex[:8]
     endpoints = ["/run/predict", "/api/predict"]
     for endpoint in endpoints:
@@ -1352,7 +1501,8 @@ _rvc_fn_cache: dict[str, int | None] = {}
 
 
 async def _rvc_audio_from_result(session: aiohttp.ClientSession,
-                                  result: list, base: str, fn_idx: int) -> bytes | None:
+                                  result: list, base: str | None, fn_idx: int) -> bytes | None:
+    base = base or Secrets.HF_SPACE_BASE
     for item in result:
         audio_url = None
         if isinstance(item, dict):
@@ -1387,8 +1537,12 @@ async def _rvc_audio_from_result(session: aiohttp.ClientSession,
 
 
 async def rvc_synthesize(session: aiohttp.ClientSession, text: str) -> bytes | None:
-    """TTS через Applio. Если недоступен — возвращает None (caller покажет сообщение)."""
-    base = "https://wqyuetasdasd-murka-rvc-inference.hf.space"
+    base = Secrets.HF_SPACE_BASE
+    # Проверяем жив ли HF Space
+    if not await _check_hf_space(session):
+        log.warning("HF Space недоступен, пропускаем RVC")
+        return None
+
     tts_voice = "ru-RU-SvetlanaNeural"
     model_name = "mashimahimeko_act2_775e_34"
     index_path = "logs/mashimahimeko/mashimahimeko_act2."
@@ -1427,9 +1581,7 @@ async def rvc_synthesize(session: aiohttp.ClientSession, text: str) -> bytes | N
 
 
 async def edge_tts_synthesize(text: str) -> bytes | None:
-    """Fallback TTS через edge-tts (Microsoft), если RVC недоступен."""
     try:
-        import subprocess
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tf:
             out_path = tf.name
@@ -1461,7 +1613,11 @@ async def rvc_convert_audio(
     audio_bytes: bytes,
     pitch: int = 0,
 ) -> bytes | None:
-    base = "https://wqyuetasdasd-murka-rvc-inference.hf.space"
+    base = Secrets.HF_SPACE_BASE
+    if not await _check_hf_space(session):
+        log.warning("HF Space недоступен, пропускаем RVC convert")
+        return None
+
     try:
         form = aiohttp.FormData()
         form.add_field("files", audio_bytes, filename="input.wav", content_type="audio/wav")
@@ -1555,7 +1711,7 @@ async def analyze_sticker_img(session, img_b64: str, mt: str = "image/webp") -> 
                 "EMO: <теги через запятую только из: funny,hype,sad,angry,love,shocked,cringe,lol,facepalm,cute,based,cope,random>\n"
                 "KEYS: <ключевые слова через запятую: персонажи, объекты, действия — для поиска>"},
         ]},
-    ], Secrets.MODEL_VISION)
+    ], Secrets.MODEL_VISION, req_type="vision")
     desc, emo, text_on_img, keys = "стикер", "funny", "", ""
     for line in raw.split("\n"):
         if line.startswith("DESC:"): desc = line[5:].strip()
@@ -1618,10 +1774,6 @@ async def maybe_send_sticker(msg: Message, answer: str,
     return answer
 
 
-async def maybe_force_sticker(msg: Message, uid_str: str):
-    pass  # отключено — источник спама стикерами
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # FORMATTING
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1652,16 +1804,21 @@ async def _send_chunk(msg: Message, chunk: str, html_mode: bool, **kwargs):
 
 
 async def send_smart(msg: Message, text: str, reply_to_msg_id: int | None = None):
+    """
+    ИСПРАВЛЕНО: убрано схлопывание одиночных переносов строк.
+    Теперь одиночные \n сохраняются — читаемость текста не ломается.
+    """
     if not text or not text.strip():
         return
+    # Только убираем тройные+ переносы, одиночные и двойные НЕ трогаем
     text = re.sub(r'\n{3,}', '\n\n', text.strip())
-    text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
     text = re.sub(r' {2,}', ' ', text).strip()
     formatted = _fmt(text)
     MAX = 3800
     kwargs: dict = {}
     if reply_to_msg_id:
-        kwargs["reply_to_message_id"] = reply_to_msg_id
+        # ИСПРАВЛЕНО: используем ReplyParameters вместо deprecated reply_to_message_id
+        kwargs["reply_parameters"] = ReplyParameters(message_id=reply_to_msg_id)
     first = True
     chunks: list[str] = []
     cur = ""
@@ -1761,6 +1918,37 @@ def read_file(data: bytes, filename: str, max_chars: int = 8000) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# REQUEST TYPE DETECTOR
+# ══════════════════════════════════════════════════════════════════════════════
+def _detect_media_request(text: str) -> str | None:
+    """Возвращает: 'photo', 'gif', 'sticker', или None"""
+    t = text.lower()
+
+    photo_rx = re.search(
+        r"(скинь|кинь|дай|покажи|пришли|отправь).{0,20}(фото|фотк|картинк|пик|изображени|снимок|фотограф)",
+        t
+    )
+    if photo_rx:
+        return "photo"
+
+    gif_rx = re.search(
+        r"(скинь|кинь|дай|покажи|пришли|отправь).{0,20}(гифк|гиф\b|анимац)",
+        t
+    )
+    if gif_rx:
+        return "gif"
+
+    sticker_rx = re.search(
+        r"(скинь|кинь|дай|покажи|пришли|отправь).{0,20}стикер",
+        t
+    )
+    if sticker_rx:
+        return "sticker"
+
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # BOT INIT
 # ══════════════════════════════════════════════════════════════════════════════
 bot = Bot(token=Secrets.TG_BOT_TOKEN,
@@ -1789,7 +1977,10 @@ async def _typing_loop(chat_id: int, stop: asyncio.Event):
             await bot.send_chat_action(chat_id, ChatAction.TYPING)
         except Exception:
             pass
-        await asyncio.sleep(4)
+        try:
+            await asyncio.wait_for(asyncio.shield(stop.wait()), timeout=4)
+        except asyncio.TimeoutError:
+            pass
 
 
 async def _upload_audio_loop(chat_id: int, stop: asyncio.Event):
@@ -1798,7 +1989,10 @@ async def _upload_audio_loop(chat_id: int, stop: asyncio.Event):
             await bot.send_chat_action(chat_id, ChatAction.RECORD_VOICE)
         except Exception:
             pass
-        await asyncio.sleep(4)
+        try:
+            await asyncio.wait_for(asyncio.shield(stop.wait()), timeout=4)
+        except asyncio.TimeoutError:
+            pass
 
 
 async def _upload_photo_loop(chat_id: int, stop: asyncio.Event):
@@ -1807,7 +2001,10 @@ async def _upload_photo_loop(chat_id: int, stop: asyncio.Event):
             await bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
         except Exception:
             pass
-        await asyncio.sleep(4)
+        try:
+            await asyncio.wait_for(asyncio.shield(stop.wait()), timeout=4)
+        except asyncio.TimeoutError:
+            pass
 
 
 def _auto_gender(uid_str: str, text: str):
@@ -1833,8 +2030,10 @@ async def cmd_start(msg: Message):
         "<b>нарисуй ...</b> — нарисую\n\n"
         "/draw — нарисовать что-нибудь\n"
         "/voice — озвучу текст\n"
+        "/music — спою песню твоим треком\n"
         "/forget — сброс памяти\n"
         "/memory — что я о тебе знаю\n"
+        "/cancel — отменить команду\n"
         "/help — помощь"
     )
 
@@ -1851,10 +2050,31 @@ async def cmd_help(msg: Message):
         "<b>команды:</b>\n"
         "/draw — скажи что нарисовать\n"
         "/voice — озвучу любой текст\n"
+        "/music — спою песню (кинь аудиофайл)\n"
         "/forget — забуду всё о тебе\n"
-        "/memory — что я о тебе знаю\n\n"
+        "/memory — что я о тебе знаю\n"
+        "/cancel — отменить текущую команду\n\n"
         "ну и просто так болтать можно"
     )
+
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(msg: Message):
+    u = uid(msg)
+    cancelled = []
+    if u in _draw_waiting:
+        _draw_waiting.discard(u)
+        cancelled.append("рисование")
+    if u in _voice_waiting:
+        _voice_waiting.discard(u)
+        cancelled.append("озвучка")
+    if u in _music_waiting:
+        _music_waiting.discard(u)
+        cancelled.append("музыка")
+    if cancelled:
+        await msg.answer(f"ок отменила: {', '.join(cancelled)}")
+    else:
+        await msg.answer("да нечего отменять")
 
 
 @dp.message(Command("forget"))
@@ -1889,40 +2109,59 @@ async def cmd_keystatus(msg: Message):
             rem = until - now
             if rem > 3600:
                 banned_long.append((i, rem))
-            elif rem > 600:
-                banned_short.append((i, rem))  # RPM 10-мин бан
             else:
                 banned_short.append((i, rem))
         else:
             free.append(i)
     lines = [f"🔑 Gemini пул: {n} ключей"]
     lines.append(f"✅ Свободных: {len(free)}")
+
     if banned_short:
-        lines.append(f"⏳ RPM-кулдаун ({len(banned_short)} шт, 10мин): " +
-                     ", ".join(f"#{i}({r:.0f}с)" for i, r in banned_short[:10]))
+        # RPM — показываем в минутах (до снятия бана)
+        rpm_parts = []
+        for i, r in banned_short[:10]:
+            mins = r / 60
+            if mins < 1:
+                rpm_parts.append(f"#{i}({r:.0f}с)")
+            else:
+                rpm_parts.append(f"#{i}({mins:.1f}м)")
+        lines.append(f"⏳ RPM-кулдаун ({len(banned_short)} шт): " + ", ".join(rpm_parts))
+
     if banned_long:
-        lines.append(f"🚫 RPD/невалид ({len(banned_long)} шт): " +
-                     ", ".join(f"#{i}({r/3600:.1f}ч)" for i, r in banned_long))
-    lines.append(f"📍 Текущий idx: {_keys._idx % max(n, 1)}")
+        # RPD — показываем в часах и минутах
+        rpd_parts = []
+        for i, r in banned_long:
+            h = int(r // 3600)
+            m = int((r % 3600) // 60)
+            rpd_parts.append(f"#{i}({h}ч {m}м)")
+        lines.append(f"🚫 RPD/невалид ({len(banned_long)} шт): " + ", ".join(rpd_parts))
+
+    lines.append(f"📍 Индексы типов: chat={_keys._type_idx.get('chat',0)%max(n,1)} vision={_keys._type_idx.get('vision',0)%max(n,1)} transcribe={_keys._type_idx.get('transcribe',0)%max(n,1)}")
     if not Secrets.OPENROUTER_KEY:
         lines.append("⚠️ OR: ключ не задан")
     else:
         or_left = max(0, _OR_DAILY_LIMIT - _or_daily_count)
-        lines.append(f"{'✅' if or_left > 10 else '⚠️'} OR fallback: {_or_daily_count}/{_OR_DAILY_LIMIT} запросов ({or_left} осталось)")
-        lines.append(f"🦙 OR модель: {Secrets.MODEL_FALLBACK_OR}")
+        lines.append(f"{'✅' if or_left > 50 else '⚠️'} OR fallback: {_or_daily_count}/{_OR_DAILY_LIMIT} ({or_left} осталось)")
+        lines.append(f"🦙 OR модели: {', '.join(Secrets.OR_FALLBACK_MODELS[:2])}")
+    lines.append(f"🤖 HF Space: {'✅ живой' if _hf_space_alive else ('❌ недоступен' if _hf_space_alive is False else '❓ не проверяли')}")
     await msg.answer("\n".join(lines))
 
 
 @dp.message(Command("checkrvc"))
 async def cmd_checkrvc(msg: Message, aiohttp_session: aiohttp.ClientSession):
-    base = "https://wqyuetasdasd-murka-rvc-inference.hf.space"
-    status = await msg.answer("🎙 проверяю HF space...")
+    base = Secrets.HF_SPACE_BASE
+    status = await msg.answer("проверяю HF space...")
     lines = [f"🔗 {base}"]
     try:
         async with aiohttp_session.get(f"{base}/", timeout=aiohttp.ClientTimeout(total=10)) as r:
             lines.append(f"✅ пинг: {r.status}")
+            global _hf_space_alive, _hf_space_last_check
+            _hf_space_alive = r.status < 500
+            _hf_space_last_check = time.time()
     except Exception as e:
         lines.append(f"❌ пинг упал: {e}")
+        _hf_space_alive = False
+        _hf_space_last_check = time.time()
         await status.edit_text("\n".join(lines))
         return
     lines.append(f"💾 fn кеш: {_rvc_fn_cache or 'пустой'}")
@@ -1938,22 +2177,24 @@ async def cmd_checkrvc(msg: Message, aiohttp_session: aiohttp.ClientSession):
         await status.edit_text("\n".join(lines))
 
 
+# ИСПРАВЛЕНО: on_draw_inline убран отдельный хендлер — теперь "нарисуй..." обрабатывается
+# внутри on_text через проверку в начале хендлера. Это фикс главного бага — F.text.regexp
+# никогда не срабатывал потому что F.text регался раньше.
+
+
 @dp.message(Command("draw"))
 async def cmd_draw(msg: Message, aiohttp_session: aiohttp.ClientSession):
     u = uid(msg)
     inline_prompt = (msg.text or "").split(None, 1)[1].strip() if msg.text and len(msg.text.split(None, 1)) > 1 else ""
     if inline_prompt:
-        draw_stop = asyncio.Event()
-        asyncio.create_task(_upload_photo_loop(msg.chat.id, draw_stop))
-        status = await msg.answer(random.choice(["ща нарисую", "рисую", "щас сделаю 🎨", "окк рисую"]))
+        stop = asyncio.Event()
+        asyncio.create_task(_upload_photo_loop(msg.chat.id, stop))
         try:
             img = await asyncio.wait_for(ai_draw(aiohttp_session, inline_prompt), timeout=90)
         except asyncio.TimeoutError:
             img = None
         finally:
-            draw_stop.set()
-            try: await status.delete()
-            except Exception: pass
+            stop.set()
         if img:
             await msg.answer_photo(BufferedInputFile(img, "murka_art.jpg"), caption="на жри 🎨")
         else:
@@ -1964,7 +2205,7 @@ async def cmd_draw(msg: Message, aiohttp_session: aiohttp.ClientSession):
             ]))
     else:
         _draw_waiting.add(u)
-        await msg.answer("чо нарисовать? пиши промт")
+        await msg.answer("чо нарисовать? пиши промт\n/cancel — отменить")
 
 
 @dp.message(Command("voice"))
@@ -1972,34 +2213,40 @@ async def cmd_voice(msg: Message, aiohttp_session: aiohttp.ClientSession):
     u = uid(msg)
     inline_text = (msg.text or "").split(None, 1)[1].strip() if msg.text and len(msg.text.split(None, 1)) > 1 else ""
     if inline_text:
-        voice_stop = asyncio.Event()
-        asyncio.create_task(_upload_audio_loop(msg.chat.id, voice_stop))
-        status = await msg.answer(random.choice(["🎙 синтезирую...", "пою...", "записываю голосяру"]))
-        try:
-            audio = await asyncio.wait_for(rvc_synthesize(aiohttp_session, inline_text), timeout=120)
-        except asyncio.TimeoutError:
-            audio = None
-        finally:
-            voice_stop.set()
-            try: await status.delete()
-            except Exception: pass
-        if not audio:
-            audio = await edge_tts_synthesize(inline_text)
-        if audio:
-            await msg.answer_voice(BufferedInputFile(audio, "murka_voice.ogg"))
-        else:
-            await msg.answer(random.choice([
-                "чото не могу щас голосом, попробуй позже",
-                "что-то не выходит с голосовым, сорри",
-                "ну не выходит голосом сейчас бля",
-            ]))
+        await _do_voice_synthesis(msg, aiohttp_session, inline_text)
     else:
         _voice_waiting.add(u)
         await msg.answer(random.choice([
-            "чо озвучить? пиши",
-            "ну пиши чо озвучить 🎙",
+            "чо озвучить? пиши\n/cancel — отменить",
+            "ну пиши чо озвучить",
             "давай текст",
-            "чо тебе сказать голосом"
+        ]))
+
+
+async def _do_voice_synthesis(msg: Message, session: aiohttp.ClientSession, text: str):
+    """Синтез голоса — без статус-сообщений типа 'синтезирую...'"""
+    stop = asyncio.Event()
+    asyncio.create_task(_upload_audio_loop(msg.chat.id, stop))
+    audio = None
+    try:
+        # Сначала RVC (если HF Space жив)
+        try:
+            audio = await asyncio.wait_for(rvc_synthesize(session, text), timeout=120)
+        except asyncio.TimeoutError:
+            audio = None
+        # Fallback на edge-tts
+        if not audio:
+            log.info("RVC недоступен/таймаут, пробуем edge-tts fallback")
+            audio = await edge_tts_synthesize(text)
+    finally:
+        stop.set()
+    if audio:
+        await msg.answer_voice(BufferedInputFile(audio, "murka_voice.ogg"))
+    else:
+        await msg.answer(random.choice([
+            "чото не могу щас голосом, попробуй позже",
+            "что-то не выходит с голосовым, сорри",
+            "ну не выходит голосом сейчас бля",
         ]))
 
 
@@ -2008,14 +2255,14 @@ async def cmd_music(msg: Message):
     u = uid(msg)
     _music_waiting.add(u)
     await msg.answer(random.choice([
-        "скидывай трек с полной песней — сама разделю на вокал и минус, спою своим голосом 🎵",
+        "скидывай трек с полной песней — сама разделю на вокал и минус, спою своим голосом 🎵\n/cancel — отменить",
         "кидай аудио файл с песней целиком. разберу сама 🎤",
-        "давай mp3/ogg с песней — всё сделаю сама"
+        "давай mp3/ogg с песней — всё сделаю сама",
     ]))
 
 
 async def separate_audio_demucs(audio_bytes: bytes) -> tuple[bytes | None, bytes | None]:
-    import tempfile, subprocess, shutil
+    import shutil
     if not shutil.which("demucs"):
         proc = await asyncio.create_subprocess_exec(
             "pip", "install", "demucs", "--break-system-packages", "-q",
@@ -2023,6 +2270,7 @@ async def separate_audio_demucs(audio_bytes: bytes) -> tuple[bytes | None, bytes
         )
         await proc.wait()
 
+    import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
         in_path  = os.path.join(tmpdir, "input.mp3")
         out_dir  = os.path.join(tmpdir, "out")
@@ -2070,16 +2318,25 @@ async def music_pipeline(
         _music_waiting.add(u)
         return
 
-    status = await msg.answer("🎵 получила трек, разделяю на вокал и минус... это займёт несколько минут")
+    # Проверяем HF Space перед длительной обработкой
+    if not await _check_hf_space(session):
+        await msg.answer(random.choice([
+            "голосовой сервер сейчас недоступен, попробуй позже",
+            "что-то с сервером не то, попробуй через 5-10 мин",
+            "сервак для голоса лежит, не могу спеть щас",
+        ]))
+        return
+
+    status = await msg.answer("получила трек, разделяю на вокал и минус... займёт несколько минут")
     try:
-        await status.edit_text("🎧 разделяю вокал и инструментал... (~5-15 мин, не уходи)")
+        await status.edit_text("разделяю вокал и инструментал... (~5-15 мин, не уходи)")
         vocals_bytes, backing_bytes = await separate_audio_demucs(audio_bytes)
 
         if not vocals_bytes:
             await status.edit_text("не смогла разделить трек, попробуй другой формат")
             return
 
-        await status.edit_text("🎙 пою своим голосом... ещё немного подожди")
+        await status.edit_text("пою своим голосом... ещё немного подожди")
         rvc_vocals = await rvc_convert_audio(session, vocals_bytes, pitch=0)
         if not rvc_vocals:
             await status.edit_text(random.choice([
@@ -2089,7 +2346,7 @@ async def music_pipeline(
             return
 
         if backing_bytes:
-            await status.edit_text("🎚 миксую трек...")
+            await status.edit_text("миксую трек...")
             final_audio = await mix_audio_ffmpeg(rvc_vocals, backing_bytes)
         else:
             final_audio = rvc_vocals
@@ -2140,7 +2397,7 @@ async def mix_audio_ffmpeg(vocals: bytes, backing: bytes) -> bytes:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# AUDIO HANDLER
+# AUDIO HANDLER — без статус-сообщений, без упоминания "слушаю"
 # ══════════════════════════════════════════════════════════════════════════════
 @dp.message(F.voice | F.audio)
 async def on_audio(msg: Message, aiohttp_session: aiohttp.ClientSession):
@@ -2154,31 +2411,34 @@ async def on_audio(msg: Message, aiohttp_session: aiohttp.ClientSession):
         await music_pipeline(aiohttp_session, msg, u, audio_bytes=raw)
         return
 
-    status = await msg.answer("🎙 слушаю...")
+    stop = asyncio.Event()
+    asyncio.create_task(_typing_loop(msg.chat.id, stop))
     try:
         raw   = await dl(obj.file_id)
         text  = await ai_transcribe(aiohttp_session, raw, fname)
 
         if not text or text in _FALLBACKS:
-            await status.edit_text("не расслышала чёт, отвечаю как слышу")
+            # Не расслышала — отвечает естественно без упоминания механики
             answer = await ai_chat(aiohttp_session, u,
                 "тебе скинули голосовое сообщение, но ты не расслышала что там. "
-                "отреагируй коротко в своём стиле.")
-            await status.delete()
-            await send_smart(msg, answer)
-            return
+                "отреагируй коротко в своём стиле. НЕ упоминай слова 'голосовое', 'войс', 'аудио', "
+                "'слушала', 'слышала', 'микрофон'. просто живая реакция.")
+        else:
+            _auto_gender(u, text)
+            mem.reset_sticker_streak(u)
+            answer = await ai_chat(aiohttp_session, u, text)
 
-        await status.edit_text(f"🎙 «{text}»\n\nотвечаю...")
-        _auto_gender(u, text)
-        mem.reset_sticker_streak(u)
-        answer = await ai_chat(aiohttp_session, u, text)
+        stop.set()
         answer = await maybe_send_sticker(msg, answer)
-        await status.delete()
-        await send_smart(msg, f"🎙 «<i>{text}</i>»\n\n{answer}")
-        asyncio.create_task(ai_extract_fact(aiohttp_session, u, text))
-    except Exception as e:
+        # Только ответ — никаких статусов и транскриптов
+        await send_smart(msg, answer)
+        if text and text not in _FALLBACKS:
+            asyncio.create_task(ai_extract_fact(aiohttp_session, u, text))
+            asyncio.create_task(maybe_react(msg, aiohttp_session, u))
+    except Exception:
+        stop.set()
         log.exception("on_audio")
-        try: await status.edit_text(_fallback())
+        try: await send_smart(msg, _fallback())
         except Exception: pass
 
 
@@ -2198,10 +2458,11 @@ async def on_photo(msg: Message, aiohttp_session: aiohttp.ClientSession):
         _auto_gender(u, caption)
         answer = await ai_vision(aiohttp_session, u, caption, img_b64)
         stop.set()
+        asyncio.create_task(maybe_react(msg, aiohttp_session, u))
         answer = await maybe_send_sticker(msg, answer)
         await send_smart(msg, answer, reply_to_msg_id=msg.message_id)
         asyncio.create_task(ai_extract_fact(aiohttp_session, u, caption))
-    except Exception as e:
+    except Exception:
         stop.set()
         log.exception("on_photo")
         await msg.answer(_fallback())
@@ -2224,6 +2485,7 @@ async def on_document(msg: Message, aiohttp_session: aiohttp.ClientSession):
     mem.reset_sticker_streak(u)
     mem.touch(u)
     stop = asyncio.Event()
+    # Для документов — статус "загружает документ" пока читаем/отвечаем
     asyncio.create_task(_typing_loop(msg.chat.id, stop))
     try:
         fname   = doc.file_name or "file"
@@ -2232,16 +2494,17 @@ async def on_document(msg: Message, aiohttp_session: aiohttp.ClientSession):
         caption = (msg.caption or "").strip() or f"расскажи про файл {fname}"
         answer  = await ai_chat(aiohttp_session, u, caption, extra_context=content)
         stop.set()
+        asyncio.create_task(maybe_react(msg, aiohttp_session, u))
         answer  = await maybe_send_sticker(msg, answer)
         await send_smart(msg, answer)
-    except Exception as e:
+    except Exception:
         stop.set()
         log.exception("on_document")
         await msg.answer(_fallback())
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STICKER HANDLER — v2: учитывает emoji и set_name для контекста
+# STICKER HANDLER
 # ══════════════════════════════════════════════════════════════════════════════
 @dp.message(F.sticker)
 async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
@@ -2252,14 +2515,12 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
     stop    = asyncio.Event()
     asyncio.create_task(_typing_loop(msg.chat.id, stop))
 
-    # Собираем контекст стикера: emoji + название пака
     sticker_emoji    = sticker.emoji or ""
     sticker_set_name = getattr(sticker, "set_name", "") or ""
     sticker_context  = ""
     if sticker_emoji:
         sticker_context += f"эмодзи стикера: {sticker_emoji}. "
     if sticker_set_name:
-        # Название пака часто описательное — передаём как контекст
         sticker_context += f"пак стикеров: {sticker_set_name}. "
 
     try:
@@ -2274,7 +2535,8 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
             prompt = (
                 f"тебе скинули стикер {sticker_emoji}. "
                 + (f"из пака '{sticker_set_name}'. " if sticker_set_name else "")
-                + "отреагируй коротко в своём стиле, 1-2 предложения."
+                + "отреагируй коротко в своём стиле, 1-2 предложения. это живой стикер/гифка, "
+                + "прояви эмоции — смешно тебе, странно, мило, или как-то ещё."
             )
             answer = await ai_chat(aiohttp_session, u, prompt)
             stop.set()
@@ -2286,7 +2548,6 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
         img_b64 = base64.b64encode(raw).decode()
         info    = await analyze_sticker_img(aiohttp_session, img_b64, "image/webp")
 
-        # Дополняем описание инфой из стикера
         if sticker_emoji:
             info["keywords"] = (info.get("keywords", "") + "," + sticker_emoji).strip(",")
         if sticker_set_name:
@@ -2312,20 +2573,21 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
         prompt = (
             f"тебе скинули стикер {sticker_emoji}: {desc_short}. "
             + (f"из пака '{sticker_set_name}'. " if sticker_set_name else "")
-            + "отреагируй коротко как пишешь подруге в тг. 1-2 предложения."
+            + "отреагируй в своём стиле — коротко и живо. что тебе этот стикер напоминает? или просто эмоция."
         )
         answer = await ai_chat(aiohttp_session, u, prompt)
         stop.set()
+        asyncio.create_task(maybe_react(msg, aiohttp_session, u))
         answer = await maybe_send_sticker(msg, answer, allow_sticker=False)
         await send_smart(msg, answer)
-    except Exception as e:
+    except Exception:
         stop.set()
         log.exception("on_sticker")
         await msg.answer("чо за стикер я не смогла рассмотреть")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# GIF / ANIMATION HANDLER — улучшенная обработка через Gemini Vision
+# GIF / ANIMATION HANDLER
 # ══════════════════════════════════════════════════════════════════════════════
 async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
                         file_id: str, thumb_file_id: str | None, caption: str,
@@ -2337,7 +2599,6 @@ async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
     asyncio.create_task(_typing_loop(msg.chat.id, stop))
     img_b64 = None
 
-    # 1) thumbnail — самый быстрый
     if thumb_file_id:
         try:
             raw = await dl(thumb_file_id)
@@ -2346,7 +2607,6 @@ async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
         except Exception as e:
             log.warning("gif thumbnail fail: %s", e)
 
-    # 2) ffmpeg кадр из видео
     if not img_b64 and (file_size == 0 or file_size < 20_000_000):
         try:
             raw   = await dl(file_id)
@@ -2366,7 +2626,6 @@ async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
             log.warning("gif reply fail: %s", ex)
 
     if img_b64:
-        # Передаём в Gemini Vision для полноценного описания
         info = await analyze_sticker_img(aiohttp_session, img_b64, "image/jpeg")
         mem.save_sticker(file_id, "gif", info["description"], info["emotion"], u,
                          info.get("keywords", ""))
@@ -2386,7 +2645,7 @@ async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
         prompt = (
             f"тебе скинули гифку: {desc_short}. "
             + (f"с подписью '{caption}'. " if caption else "")
-            + "отреагируй коротко в своём стиле."
+            + "отреагируй коротко в своём стиле — с эмоцией, живо. что ты думаешь об этой гифке?"
         )
     else:
         if streak >= 3 and mem.vault_size() > 0:
@@ -2398,7 +2657,7 @@ async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
         prompt = (
             "тебе скинули гифку"
             + (f" с подписью '{caption}'" if caption else "")
-            + ". отреагируй в своём стиле."
+            + ". отреагируй в своём стиле с эмоцией."
         )
 
     try:
@@ -2414,7 +2673,6 @@ async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
 
 @dp.message(F.animation)
 async def on_gif(msg: Message, aiohttp_session: aiohttp.ClientSession):
-    """Нативные TG гифки (mp4 без звука) через F.animation."""
     anim = msg.animation
     thumb_fid = anim.thumbnail.file_id if anim.thumbnail else None
     await _process_gif(msg, aiohttp_session, anim.file_id, thumb_fid,
@@ -2422,7 +2680,7 @@ async def on_gif(msg: Message, aiohttp_session: aiohttp.ClientSession):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# VIDEO / VIDEO_NOTE HANDLER
+# VIDEO / VIDEO_NOTE HANDLER — без статусов, кружки без показа транскрипта
 # ══════════════════════════════════════════════════════════════════════════════
 @dp.message(F.video | F.video_note)
 async def on_video(msg: Message, aiohttp_session: aiohttp.ClientSession):
@@ -2442,22 +2700,20 @@ async def on_video(msg: Message, aiohttp_session: aiohttp.ClientSession):
             except Exception: pass
 
         if is_circle:
-            status = await msg.answer("👀 смотрю кружок...")
+            # Кружок — пробуем транскрипт, НЕ показываем статус и НЕ показываем транскрипт
             try:
                 raw_video = await dl(video.file_id)
                 text      = await ai_transcribe(aiohttp_session, raw_video, "circle.mp4")
-                await status.delete()
                 if text and text.strip():
                     _auto_gender(u, text)
                     mem.reset_sticker_streak(u)
                     answer = await ai_chat(aiohttp_session, u, text)
                     stop.set()
                     answer = await maybe_send_sticker(msg, answer)
-                    await send_smart(msg, f"👀 «<i>{text}</i>»\n\n{answer}")
+                    await send_smart(msg, answer)
                     return
             except Exception as e:
                 log.warning("circle transcribe fail: %s", e)
-                await status.delete()
 
         if img_b64:
             prompt = (
@@ -2475,6 +2731,7 @@ async def on_video(msg: Message, aiohttp_session: aiohttp.ClientSession):
             answer = await ai_chat(aiohttp_session, u, prompt)
 
         stop.set()
+        asyncio.create_task(maybe_react(msg, aiohttp_session, u))
         answer = await maybe_send_sticker(msg, answer)
         await send_smart(msg, answer)
     except Exception:
@@ -2498,19 +2755,16 @@ async def _web_search_ctx(session: aiohttp.ClientSession, query: str) -> str:
     from urllib.parse import quote
     encoded = quote(query[:100])
 
-    # Пробуем несколько источников
     sources = [
-        # DuckDuckGo JSON API (не банит)
         (f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&skip_disambig=1",
          "ddg_json"),
-        # DuckDuckGo HTML (запасной)
         (f"https://duckduckgo.com/html/?q={encoded}&kl=ru-ru",
          "ddg_html"),
     ]
 
     for url, src in sources:
         try:
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                        "Accept-Language": "ru-RU,ru;q=0.9"}
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=8),
                                    headers=headers) as r:
@@ -2523,11 +2777,9 @@ async def _web_search_ctx(session: aiohttp.ClientSession, query: str) -> str:
                     except Exception:
                         continue
                     snippets = []
-                    # AbstractText — краткое описание
                     abstract = data.get("AbstractText", "").strip()
                     if abstract and len(abstract) > 30:
                         snippets.append(abstract[:400])
-                    # RelatedTopics
                     for topic in data.get("RelatedTopics", [])[:4]:
                         text_chunk = topic.get("Text", "") if isinstance(topic, dict) else ""
                         text_chunk = re.sub(r"<[^>]+>", "", text_chunk).strip()
@@ -2536,10 +2788,9 @@ async def _web_search_ctx(session: aiohttp.ClientSession, query: str) -> str:
                     if snippets:
                         result = "[из интернета]\n" + "\n".join(snippets[:4])
                         _web_search_cache[cache_key] = (time.time(), result)
-                        log.info("web_search DDG JSON ok: %d chars", len(result))
                         return result
 
-                else:  # html
+                else:
                     html_text = await r.text()
                     snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</(?:a|span)>',
                                           html_text, re.DOTALL)
@@ -2552,7 +2803,6 @@ async def _web_search_ctx(session: aiohttp.ClientSession, query: str) -> str:
                     if clean:
                         result = "[из интернета]\n" + "\n".join(clean[:4])
                         _web_search_cache[cache_key] = (time.time(), result)
-                        log.info("web_search DDG HTML ok: %d chars", len(result))
                         return result
 
         except Exception as e:
@@ -2563,11 +2813,8 @@ async def _web_search_ctx(session: aiohttp.ClientSession, query: str) -> str:
 
 async def search_and_send_pic(msg: Message, query: str,
                               session: aiohttp.ClientSession) -> bool:
-    """Ищет/генерирует картинку через Pollinations и отправляет."""
     from urllib.parse import quote
-    # переводим запрос на английский для лучшего результата
     try:
-        from urllib.parse import quote as _q
         en_query = await ai_translate_to_en(session, query)
     except Exception:
         en_query = query
@@ -2578,10 +2825,10 @@ async def search_and_send_pic(msg: Message, query: str,
         f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512&nologo=true&nofeed=true&model=turbo&seed={seed}",
     ]
     _IMAGE_MAGIC = (
-        b'\xff\xd8\xff',  # JPEG
-        b'\x89PNG',       # PNG
-        b'GIF8',          # GIF
-        b'RIFF',          # WEBP
+        b'\xff\xd8\xff',
+        b'\x89PNG',
+        b'GIF8',
+        b'RIFF',
     )
     for url in urls:
         try:
@@ -2600,7 +2847,6 @@ async def search_and_send_pic(msg: Message, query: str,
                     if is_img:
                         await msg.answer_photo(BufferedInputFile(data, "pic.jpg"))
                         return True
-                    log.warning("search_and_send_pic: got non-image data size=%d", len(data))
         except asyncio.TimeoutError:
             log.warning("search_and_send_pic timeout")
         except Exception as e:
@@ -2610,6 +2856,7 @@ async def search_and_send_pic(msg: Message, query: str,
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TEXT HANDLER — главный
+# ИСПРАВЛЕНО: "нарисуй ..." обрабатывается здесь же, не в отдельном хендлере
 # ══════════════════════════════════════════════════════════════════════════════
 @dp.message(F.text)
 async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
@@ -2622,22 +2869,41 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
     asyncio.create_task(_typing_loop(msg.chat.id, stop))
 
     try:
+        # ИСПРАВЛЕНО: "нарисуй ..." — обрабатываем здесь, без отдельного хендлера
+        draw_inline = re.match(r"(?i)^нарисуй\s+.+", text)
+        if draw_inline:
+            stop.set()
+            draw_stop = asyncio.Event()
+            asyncio.create_task(_upload_photo_loop(msg.chat.id, draw_stop))
+            img = None
+            try:
+                img = await asyncio.wait_for(ai_draw(aiohttp_session, text), timeout=90)
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                draw_stop.set()
+            if img:
+                await msg.answer_photo(BufferedInputFile(img, "murka_art.jpg"), caption="на жри 🎨")
+            else:
+                await msg.answer(random.choice([
+                    "pollinations лежит сейчас, попробуй через минуту",
+                    "сервер рисования не отвечает 😔 попробуй позже",
+                ]))
+            return
+
         # /draw промт
         if u in _draw_waiting:
             _draw_waiting.discard(u)
             stop.set()
             draw_stop = asyncio.Event()
             asyncio.create_task(_upload_photo_loop(msg.chat.id, draw_stop))
-            status = await msg.answer(random.choice(["ща нарисую", "рисую", "щас сделаю 🎨", "окк рисую"]))
+            img = None
             try:
                 img = await asyncio.wait_for(ai_draw(aiohttp_session, text), timeout=90)
             except asyncio.TimeoutError:
-                img = None
-                log.warning("ai_draw timeout 90s")
+                pass
             finally:
                 draw_stop.set()
-                try: await status.delete()
-                except Exception: pass
             if img:
                 await msg.answer_photo(BufferedInputFile(img, "murka_art.jpg"), caption="на жри 🎨")
             else:
@@ -2652,38 +2918,7 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
         if u in _voice_waiting:
             _voice_waiting.discard(u)
             stop.set()
-            voice_stop = asyncio.Event()
-            asyncio.create_task(_upload_audio_loop(msg.chat.id, voice_stop))
-            status = await msg.answer(random.choice(["🎙 синтезирую...", "пою...", "записываю голосяру"]))
-            try:
-                audio = await asyncio.wait_for(
-                    rvc_synthesize(aiohttp_session, text), timeout=120
-                )
-            except asyncio.TimeoutError:
-                audio = None
-            finally:
-                voice_stop.set()
-                try: await status.delete()
-                except Exception: pass
-            if not audio:
-                # RVC лежит — пробуем edge-tts как fallback
-                log.info("RVC недоступен, пробуем edge-tts fallback")
-                audio = await edge_tts_synthesize(text)
-            if audio:
-                await msg.answer_voice(BufferedInputFile(audio, "murka_voice.ogg"))
-            else:
-                fail_phrases = [
-                    "чото не могу щас голосом, попробуй позже",
-                    "что-то не выходит с голосовым, сорри",
-                    "нее щас не получится голосом, попробуй чуть позже",
-                    "ну не выходит голосом сейчас бля",
-                ]
-                await msg.answer(random.choice(fail_phrases))
-                pick = mem.find_stickers("cope sad facepalm", file_type="sticker", limit=3)
-                if not pick: pick = [mem.random_sticker()] if mem.random_sticker() else []
-                if pick:
-                    try: await msg.answer_sticker(random.choice(pick)["file_id"])
-                    except Exception: pass
+            await _do_voice_synthesis(msg, aiohttp_session, text)
             return
 
         # /music — ждём аудиофайл
@@ -2697,43 +2932,31 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
             _music_waiting.add(u)
             return
 
-        # запрос стикера
-        sticker_req = re.search(
-            r"(?i)(скинь|кинь|дай|покажи|найди).{0,25}(стикер)",
-            text
-        )
-        sticker_clarify = (
-            not sticker_req and
-            _last_sticker_query.get(u) and
-            re.search(r"(?i)(не|нет|другой|тот|который|с |про |из |где)", text) and
-            len(text) < 80
-        )
-        if (sticker_req or sticker_clarify) and mem.vault_size() > 0:
-            if sticker_req:
-                q = re.sub(r"(?i)(скинь|кинь|дай|покажи|найди).{0,25}(стикер)\s*(с|про|на|из)?\s*", "", text).strip()
+        # Детект запроса медиа
+        media_type = _detect_media_request(text)
+
+        if media_type == "sticker":
+            if mem.vault_size() > 0:
+                q = re.sub(r"(?i)(скинь|кинь|дай|покажи|пришли|отправь).{0,25}стикер\s*(с|про|на|из|где)?\s*", "", text).strip()
+                _last_sticker_query[u] = q
+                results = mem.find_stickers(q, file_type="sticker", limit=8) if q else []
+                pick = random.choice(results) if results else mem.random_sticker("sticker")
+                stop.set()
+                if pick:
+                    try:
+                        await msg.answer_sticker(pick["file_id"])
+                        await send_smart(msg, random.choice(["на", "держи", "вот", "нашла чот"]))
+                    except Exception as e:
+                        log.warning("sticker req fail: %s", e)
+                else:
+                    await send_smart(msg, "у меня пока стикеров нет — скидывай мне, буду собирать")
             else:
-                q = (_last_sticker_query.get(u, "") + " " + text).strip()
-            _last_sticker_query[u] = q
-            results = mem.find_stickers(q, file_type="sticker", limit=8) if q else []
-            pick = random.choice(results) if results else mem.random_sticker("sticker")
-            stop.set()
-            if pick:
-                try:
-                    await msg.answer_sticker(pick["file_id"])
-                    await send_smart(msg, random.choice(["на", "держи", "вот", "нашла чот"]))
-                except Exception as e:
-                    log.warning("sticker req fail: %s", e)
-            else:
-                await send_smart(msg, "у меня пока стикеров нет — скидывай мне, буду собирать")
+                stop.set()
+                await send_smart(msg, "у меня пока нет стикеров, скидывай мне — буду копить")
             return
 
-        # запрос гифки
-        gif_match = re.search(
-            r"(?i)(скинь|кинь|дай|покажи|найди).{0,20}(гифк|гиф)",
-            text
-        )
-        if gif_match:
-            tag_query = re.sub(r"(?i)(скинь|кинь|дай|покажи|найди).{0,20}(гифк|гиф)\s*(с|про|на)?\s*", "", text).strip()
+        if media_type == "gif":
+            tag_query = re.sub(r"(?i)(скинь|кинь|дай|покажи|пришли|отправь).{0,20}(гифк|гиф\b|анимац)\s*(с|про|на)?\s*", "", text).strip()
             gif_results = mem.find_stickers(tag_query, file_type="gif", limit=5) if tag_query else []
             if not gif_results:
                 gif_pick_any = mem.random_sticker("gif")
@@ -2750,20 +2973,61 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
                 await send_smart(msg, "у меня пока нет гифок — кидай мне какую-нибудь я запомню")
             return
 
-        # поиск картинки
-        pic_match = re.search(
-            r"(?i)(скинь|найди|покажи|кинь|дай).{0,15}(картинк|фото|пик|изображени|мем)",
-            text
-        )
-        if pic_match:
-            query = re.sub(r"(?i)(скинь|найди|покажи|кинь|дай).{0,15}(картинк|фото|пик|изображени|мем)\s*(о|про|с|по)?\s*", "", text).strip()
+        if media_type == "photo":
+            query = re.sub(r"(?i)(скинь|кинь|дай|покажи|пришли|отправь).{0,20}(фото|фотк|картинк|пик|изображени|снимок|фотограф)\s*(о|про|с|по|из|где)?\s*", "", text).strip()
             if not query: query = text
             stop.set()
-            sent = await search_and_send_pic(msg, query, aiohttp_session)
+            draw_stop = asyncio.Event()
+            asyncio.create_task(_upload_photo_loop(msg.chat.id, draw_stop))
+            try:
+                sent = await search_and_send_pic(msg, query, aiohttp_session)
+            finally:
+                draw_stop.set()
             if sent:
                 await send_smart(msg, random.choice(["на", "держи", "вот", "нашла"]))
             else:
                 await send_smart(msg, "не нашла ничего нормального, попробуй /draw — сама нарисую")
+            return
+
+        # Старая логика поиска картинок (мемы и т.д.)
+        pic_match = re.search(
+            r"(?i)(скинь|найди|покажи|кинь|дай).{0,15}(картинк|мем)",
+            text
+        )
+        if pic_match:
+            query = re.sub(r"(?i)(скинь|найди|покажи|кинь|дай).{0,15}(картинк|мем)\s*(о|про|с|по)?\s*", "", text).strip()
+            if not query: query = text
+            stop.set()
+            draw_stop = asyncio.Event()
+            asyncio.create_task(_upload_photo_loop(msg.chat.id, draw_stop))
+            try:
+                sent = await search_and_send_pic(msg, query, aiohttp_session)
+            finally:
+                draw_stop.set()
+            if sent:
+                await send_smart(msg, random.choice(["на", "держи", "вот", "нашла"]))
+            else:
+                await send_smart(msg, "не нашла ничего нормального, попробуй /draw — сама нарисую")
+            return
+
+        # Уточнение стикера
+        sticker_clarify = (
+            _last_sticker_query.get(u) and
+            re.search(r"(?i)(не|нет|другой|тот|который|с |про |из |где)", text) and
+            len(text) < 80
+        )
+        if sticker_clarify and mem.vault_size() > 0:
+            q = (_last_sticker_query.get(u, "") + " " + text).strip()
+            _last_sticker_query[u] = q
+            results = mem.find_stickers(q, file_type="sticker", limit=8)
+            pick = random.choice(results) if results else mem.random_sticker("sticker")
+            stop.set()
+            if pick:
+                try:
+                    await msg.answer_sticker(pick["file_id"])
+                    await send_smart(msg, random.choice(["на", "держи", "вот", "нашла чот"]))
+                except Exception as e:
+                    log.warning("sticker clarify fail: %s", e)
             return
 
         mem.touch(u)
@@ -2779,25 +3043,20 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
                 else:
                     reply_ctx = f"[юзер отвечает на сообщение: «{rt_text[:400]}»]"
 
-        # веб-поиск для актуальных вопросов, фактов, Reverse 1999
+        # веб-поиск
         web_ctx = ""
         _search_rx = re.compile(
             r"(?i)("
-            # игры / аниме
             r"reverse|реверс|баннер|1999|изольд|арканист|психуб|мета|тир|дота|"
-            # актуальность / новости
             r"новост|актуальн|вышел|вышла|вышли|обновлени|патч|релиз|"
             r"сегодня|сейчас|недавно|в этом году|в 2024|в 2025|"
-            # факты / информация
             r"кто такой|что такое|расскажи про|что знаешь про|"
             r"кто написал|кто создал|когда вышел|история |"
             r"объясни|как работает|почему |зачем |"
-            # цены / курсы / рейтинги
             r"скольк|курс|цена|стоит|топ |лучш|рейтинг|"
             r"сравни|versus|vs |против "
             r")"
         )
-        # НЕ искать если вопрос про мурку саму
         _no_search_rx = re.compile(r"(?i)(ты|мурка|себя|тебя|ии|нейро|бот|модел)")
         if _search_rx.search(text) and not _no_search_rx.search(text[:30]):
             web_ctx = await _web_search_ctx(aiohttp_session, text)
@@ -2805,6 +3064,8 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
         full_ctx = "\n\n".join(x for x in [reply_ctx, web_ctx] if x)
         answer = await ai_chat(aiohttp_session, u, text, reply_context=full_ctx)
         stop.set()
+        # Ставим реакцию на сообщение юзера — редко и метко
+        asyncio.create_task(maybe_react(msg, aiohttp_session, u))
         answer = await maybe_send_sticker(msg, answer)
         await send_smart(msg, answer)
 
@@ -2815,34 +3076,91 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
         if last_bot and len(text) < 50:
             asyncio.create_task(ai_detect_trick(aiohttp_session, u, last_bot, text))
 
-    except Exception as e:
+    except Exception:
         stop.set()
         log.exception("on_text")
         await msg.answer(_fallback())
 
 
-# inline "нарисуй ..."
-@dp.message(F.text.regexp(r"(?i)^нарисуй\s+.+"))
-async def on_draw_inline(msg: Message, aiohttp_session: aiohttp.ClientSession):
-    u    = uid(msg)
-    stop = asyncio.Event()
-    asyncio.create_task(_upload_photo_loop(msg.chat.id, stop))
+# ══════════════════════════════════════════════════════════════════════════════
+# РЕАКЦИЯ НА РЕАКЦИЮ ЮЗЕРА — мурка видит что юзер поставил реакцию на её соо
+# ══════════════════════════════════════════════════════════════════════════════
+_reaction_handled: dict[str, float] = {}  # ключ -> ts, чтоб не дублировать
+
+@dp.message_reaction()
+async def on_reaction(event: MessageReactionUpdated, aiohttp_session: aiohttp.ClientSession):
+    """Юзер поставил/убрал реакцию на сообщение мурки."""
     try:
-        status = await msg.answer(random.choice(["ща нарисую", "рисую", "щас сделаю 🎨", "окк рисую"]))
-        img = await ai_draw(aiohttp_session, msg.text)
-        stop.set()
-        await status.delete()
-        if img:
-            await msg.answer_photo(BufferedInputFile(img, "murka_art.jpg"), caption="на жри 🎨")
+        # Проверяем доступ
+        chat_id = event.chat.id
+        if Secrets.ALLOWED_IDS and chat_id not in Secrets.ALLOWED_IDS:
+            return
+
+        user = event.user
+        if not user or user.is_bot:
+            return
+
+        # Только новые реакции (не убирание)
+        new_reactions = event.new_reaction or []
+        if not new_reactions:
+            return  # убрал реакцию — молчим
+
+        uid_str = f"tg:{user.id}"
+        msg_id  = event.message_id
+
+        # Дедупликация — не реагируем дважды на одно сообщение
+        dedup_key = f"{chat_id}:{msg_id}"
+        now = time.time()
+        if now - _reaction_handled.get(dedup_key, 0) < 30:
+            return
+        _reaction_handled[dedup_key] = now
+
+        # Собираем эмодзи реакции
+        emojis = []
+        for r in new_reactions:
+            if hasattr(r, "emoji"):
+                emojis.append(r.emoji)
+        if not emojis:
+            return
+
+        emoji_str = " ".join(emojis)
+        log.info("Реакция юзера %s: %s на msg_id=%d", uid_str, emoji_str, msg_id)
+
+        # Кулдаун — не отвечаем чаще раза в 2 минуты на реакции от одного юзера
+        react_cd_key = f"react_cd:{uid_str}"
+        if now - _reaction_handled.get(react_cd_key, 0) < 120:
+            return
+        _reaction_handled[react_cd_key] = now
+
+        # Получаем текст нашего сообщения (из истории)
+        history = mem.get_history(uid_str)
+        # Ищем последние сообщения ассистента
+        bot_msgs = [m["content"] for m in history if m["role"] == "assistant"]
+        last_bot_msg = bot_msgs[-1] if bot_msgs else ""
+
+        # Строим промпт — мурка видит своё сообщение и реакцию
+        if last_bot_msg:
+            prompt = (
+                f"юзер поставил реакцию {emoji_str} на твоё сообщение: «{last_bot_msg[:200]}»\n"
+                f"отреагируй на это коротко в своём стиле — 1 предложение максимум. "
+                f"это должно быть органично: типа ты видишь реакцию и что-то думаешь по этому поводу. "
+                f"НЕ пиши 'ты поставил реакцию' или 'я вижу реакцию' — просто живо отреагируй."
+            )
         else:
-            await msg.answer(random.choice([
-                "pollinations лежит сейчас, попробуй через минуту",
-                "сервер рисования не отвечает 😔 попробуй позже",
-            ]))
-    except Exception as e:
-        stop.set()
-        log.exception("on_draw_inline")
-        await msg.answer(_fallback())
+            prompt = (
+                f"юзер поставил реакцию {emoji_str} на одно из твоих сообщений. "
+                f"отреагируй коротко в своём стиле — 1 предложение. живо и органично."
+            )
+
+        answer = await ai_chat(aiohttp_session, uid_str, prompt)
+        if answer and answer not in _FALLBACKS:
+            await bot.send_message(
+                chat_id,
+                answer,
+                reply_parameters=ReplyParameters(message_id=msg_id),
+            )
+    except Exception:
+        log.exception("on_reaction")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2935,6 +3253,11 @@ class AccessMiddleware(BaseMiddleware):
             chat_id = event.callback_query.message.chat.id if event.callback_query.message else None
         elif hasattr(event, "inline_query") and event.inline_query:
             chat_id = event.inline_query.from_user.id
+        elif hasattr(event, "message_reaction"):
+            # MessageReactionUpdated
+            mr = event.message_reaction
+            if mr:
+                chat_id = mr.chat.id
 
         if chat_id is None:
             return await handler(event, data)
@@ -2972,23 +3295,28 @@ async def main():
         BotCommand(command="music",     description="спеть песню голосом мурки"),
         BotCommand(command="forget",    description="сбросить память"),
         BotCommand(command="memory",    description="что я о тебе знаю"),
+        BotCommand(command="cancel",    description="отменить текущую команду"),
         BotCommand(command="help",      description="помощь"),
-        BotCommand(command="keystatus", description="статус ключей gemini"),
+        BotCommand(command="keystatus", description="статус ключей и серверов"),
         BotCommand(command="checkrvc",  description="проверить голосовой сервер"),
     ], scope=BotCommandScopeDefault())
 
     async with aiohttp.ClientSession() as session:
         dp.update.middleware(SessionMiddleware(session))
         dp.update.outer_middleware(AccessMiddleware())
-        log.info("Murka Bot v9 запущена")
+        log.info("Murka Bot v12 запущена")
         asyncio.create_task(_proactive_loop(session))
         while True:
             try:
+                # message_reaction нужно явно запросить — не входит в resolve_used_update_types
+                auto_updates = dp.resolve_used_update_types()
+                if "message_reaction" not in auto_updates:
+                    auto_updates = list(auto_updates) + ["message_reaction"]
                 await dp.start_polling(
                     bot,
                     skip_updates=True,
                     drop_pending_updates=True,
-                    allowed_updates=dp.resolve_used_update_types(),
+                    allowed_updates=auto_updates,
                 )
                 break
             except Exception as e:
