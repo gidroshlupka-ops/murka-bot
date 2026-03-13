@@ -143,6 +143,10 @@ class Secrets:
     HF_SPACE_BASE: str = os.environ.get(
         "HF_SPACE_URL", "https://wqyuetasdasd-murka-rvc-inference.hf.space"
     )
+    # Together.ai — генерация картинок (FLUX)
+    TOGETHER_KEY: str = os.environ.get("TOGETHER_KEY", "")
+    # Unsplash — поиск реальных фото
+    UNSPLASH_KEY: str = os.environ.get("UNSPLASH_KEY", "")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -437,7 +441,7 @@ class Memory:
         with self._conn() as c:
             row = c.execute(
                 "SELECT gender,confidence FROM user_gender WHERE uid=?", (uid,)).fetchone()
-        return row["gender"] if row and row["confidence"] >= 2 else None
+        return row["gender"] if row and row["confidence"] >= 1 else None
 
     def save_sticker(self, file_id: str, file_type: str,
                      description: str, emotion: str, from_uid: str,
@@ -852,6 +856,10 @@ _GENDER_FIXES = [
     (r'\bя\s+занят\b',     'я занята'),
     (r'\bбыл\s+рад\b',     'была рада'),
     (r'\bбыл\s+готов\b',   'была готова'),
+    (r'\bя\s+смог\b',      'я смогла'),
+    (r'\bя\s+помог\b',     'я помогла'),
+    (r'\bрад\s+помочь\b',  'рада помочь'),
+    (r'\bне\s+за\s+что\b(?!\s+говорить)', 'пожалуйста'),
 ]
 
 def _fix_gender(text: str) -> str:
@@ -935,11 +943,11 @@ GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:ge
 
 _FALLBACKS = ["ща погоди", "...", "мозг завис"]
 _ALIVE_FALLBACKS = [
-    "у меня щас мозг завис, напиши чуть позже",
-    "чот тормозю, попробуй ещё раз",
-    "не могу ответить прямо щас, чуть позже ок?",
+    "ой стой я щас",
+    "подожди секунду",
+    "хм...",
     "...",
-    "сервак упал, подожди немного",
+    "щас",
 ]
 _fb_i = 0
 def _fallback() -> str:
@@ -1383,50 +1391,99 @@ async def ai_transcribe(session: aiohttp.ClientSession,
     return ""
 
 
-async def ai_draw(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
-    from urllib.parse import quote
-    clean = re.sub(r"(?i)^(нарисуй|/draw)\s*", "", prompt).strip()
-    if not clean:
+def _is_image_bytes(data: bytes) -> bool:
+    return len(data) > 5000 and data[:4] in (
+        b'\xff\xd8\xff\xe0', b'\xff\xd8\xff\xe1', b'\xff\xd8\xff\xe2',
+        b'\xff\xd8\xff\xdb', b'\x89PNG', b'GIF8',
+    )
+
+
+async def _draw_together(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
+    """Генерация через Together.ai FLUX — надёжный платный tier."""
+    if not Secrets.TOGETHER_KEY:
         return None
-
     try:
-        en_prompt = await ai_translate_to_en(session, clean)
-    except Exception:
-        en_prompt = clean
+        payload = {
+            "model": "black-forest-labs/FLUX.1-schnell-Free",
+            "prompt": prompt,
+            "width": 1024, "height": 1024,
+            "steps": 4, "n": 1,
+            "response_format": "b64_json",
+        }
+        async with session.post(
+            "https://api.together.xyz/v1/images/generations",
+            json=payload,
+            headers={"Authorization": f"Bearer {Secrets.TOGETHER_KEY}",
+                     "Content-Type": "application/json"},
+            timeout=aiohttp.ClientTimeout(total=60),
+        ) as r:
+            if r.status == 200:
+                data = await r.json()
+                b64 = data["data"][0].get("b64_json", "")
+                if b64:
+                    img = base64.b64decode(b64)
+                    if _is_image_bytes(img):
+                        log.info("draw Together OK size=%d", len(img))
+                        return img
+            else:
+                log.warning("draw Together %d: %s", r.status, (await r.text())[:120])
+    except Exception as e:
+        log.error("draw Together exc: %s", e)
+    return None
 
-    encoded = quote(en_prompt or clean)
+
+async def _draw_pollinations(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
+    """Генерация через Pollinations — бесплатный fallback."""
+    from urllib.parse import quote
+    encoded = quote(prompt)
     seed = random.randint(1, 999999)
-
     urls = [
         f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&nofeed=true&model=flux&seed={seed}&safe=false",
+        f"https://image.pollinations.ai/prompt/{encoded}?width=768&height=768&nologo=true&nofeed=true&model=flux&seed={seed}",
         f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512&nologo=true&nofeed=true&model=turbo&seed={seed}",
-        f"https://pollinations.ai/p/{encoded}?width=512&height=512&nologo=true&model=turbo&seed={seed}",
     ]
     for i, url in enumerate(urls):
         try:
-            log.info("draw attempt %d: %s", i, url[:80])
-            async with session.get(
-                url,
-                timeout=aiohttp.ClientTimeout(total=120),
-                headers={"User-Agent": "Mozilla/5.0"},
+            log.info("draw pollinations %d: %s", i, url[:90])
+            async with session.get(url,
+                timeout=aiohttp.ClientTimeout(total=90),
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
                 allow_redirects=True,
             ) as r:
                 if r.status == 200:
                     ct = r.headers.get("content-type", "")
-                    data = await r.read()
-                    if len(data) > 5000 and ("image" in ct or data[:4] in (b'\xff\xd8\xff\xe0', b'\xff\xd8\xff\xe1', b'\x89PNG')):
-                        log.info("draw OK size=%d", len(data))
-                        return data
-                    log.warning("draw %d: status OK but bad content ct=%s size=%d", i, ct, len(data))
+                    raw = await r.read()
+                    if "image" in ct and _is_image_bytes(raw):
+                        log.info("draw pollinations OK size=%d", len(raw))
+                        return raw
+                    log.warning("draw pollinations %d: bad ct=%s size=%d", i, ct, len(raw))
                 else:
-                    log.warning("draw %d: status %d", i, r.status)
+                    log.warning("draw pollinations %d: status %d", i, r.status)
         except asyncio.TimeoutError:
-            log.warning("draw %d timeout", i)
+            log.warning("draw pollinations %d timeout", i)
         except Exception as e:
-            log.error("draw %d exc: %s", i, e)
-        if i == 0:
-            await asyncio.sleep(2)
+            log.error("draw pollinations %d exc: %s", i, e)
+        if i < 2:
+            await asyncio.sleep(1)
     return None
+
+
+async def ai_draw(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
+    clean = re.sub(r"(?i)^(нарисуй|/draw)\s*", "", prompt).strip()
+    if not clean:
+        return None
+    try:
+        en_prompt = await ai_translate_to_en(session, clean)
+    except Exception:
+        en_prompt = clean
+    final_prompt = en_prompt or clean
+
+    # Сначала Together.ai (надёжно), потом Pollinations (бесплатный fallback)
+    result = await _draw_together(session, final_prompt)
+    if result:
+        return result
+    log.info("draw Together не вышло, пробуем Pollinations")
+    return await _draw_pollinations(session, final_prompt)
 
 
 async def ai_translate_to_en(session: aiohttp.ClientSession, text: str) -> str:
@@ -1446,17 +1503,33 @@ async def ai_extract_fact(session: aiohttp.ClientSession, uid_str: str, text: st
     if len(text) < 8: return
     if text.startswith("/") or text.startswith("[") or len(text) > 800:
         return
+
+    # Сначала быстро проверяем пол по регулярке — без API
+    g = detect_gender(text)
+    if g:
+        mem.update_gender(uid_str, g)
+
     result = await _or_post(session, {
-        "model": Secrets.MODEL_FALLBACK_OR, "max_tokens": 60,
+        "model": Secrets.MODEL_FALLBACK_OR, "max_tokens": 80,
         "messages": [{"role": "user", "content":
             f"Если в сообщении пользователь сообщает факт о себе "
-            f"(имя, город, работа, предпочтение) — ответь одной строкой с фактом. "
-            f"Иначе ответь словом НЕТ.\nСообщение: {text[:300]}"}],
+            f"(имя, город, работа, увлечение, предпочтение, пол) — ответь одной строкой с фактом. "
+            f"Если пол понятен из контекста (мужские/женские глагольные формы) — тоже укажи: 'пол: мужской' или 'пол: женский'. "
+            f"Если нет никаких фактов — ответь словом НЕТ.\nСообщение: {text[:300]}"}],
     })
     _bad = {"ща погоди", "...", "мозг завис", "нет"}
     cleaned = result.strip() if result else ""
-    if cleaned and cleaned.upper() != "НЕТ" and cleaned.lower() not in _bad and len(cleaned) < 150:
-        mem.add_fact(uid_str, cleaned)
+    if not cleaned or cleaned.upper() == "НЕТ" or cleaned.lower() in _bad or len(cleaned) >= 150:
+        return
+    # Если факт про пол — обновляем gender отдельно, не дублируем в facts
+    cl = cleaned.lower()
+    if "пол: мужской" in cl or "мужской пол" in cl:
+        mem.update_gender(uid_str, "m")
+        return
+    if "пол: женский" in cl or "женский пол" in cl:
+        mem.update_gender(uid_str, "f")
+        return
+    mem.add_fact(uid_str, cleaned)
 
 
 async def ai_detect_trick(
@@ -1800,20 +1873,28 @@ async def maybe_send_sticker(msg: Message, answer: str,
     msgs_since_last = _sticker_msg_counter[u_key]
     min_gap = random.randint(8, 14)
 
+    # Вычисляем текст без тега ДО всего
+    answer_without_tag = re.sub(r"\[(СТИКЕР|ГИФКА):\s*[^\]]+\]", "", answer, flags=re.I).strip()
+
+    # Если AI явно обещает что-то скинуть — форсируем отправку вне зависимости от counter
+    _PROMISE_WORDS = re.compile(
+        r"\b(ну лови|лови|держи|вот лови|на вот|смотри что нашла|скидываю|кидаю|кину|вот гифка|вот стикер)\b",
+        re.I
+    )
+    force_send = bool(match and _PROMISE_WORDS.search(answer_without_tag))
+
     can_send = (
         allow_sticker
         and match
         and mem.vault_size() > 0
-        and msgs_since_last >= min_gap
+        and (msgs_since_last >= min_gap or force_send)
     )
 
-    # Вычисляем текст без тега ДО отправки стикера
-    answer_without_tag = re.sub(r"\[(СТИКЕР|ГИФКА):\s*[^\]]+\]", "", answer, flags=re.I).strip()
-
-    # Если после удаления тега остаётся только заглушка типа "на"/"вот" — не шлём стикер
+    # Если после удаления тега остаётся только заглушка — не шлём (но force_send переопределяет)
     _STICKER_STUB_WORDS = {"на", "вот", "держи", "лови", "смотри", "гляди", "ну", "да", "хм"}
     remaining_words = set(answer_without_tag.lower().split())
-    text_is_stub = len(answer_without_tag) < 10 and remaining_words.issubset(_STICKER_STUB_WORDS)
+    text_is_stub = (len(answer_without_tag) < 10 and remaining_words.issubset(_STICKER_STUB_WORDS)
+                    and not force_send)
 
     if can_send and not text_is_stub:
         tags    = match.group(1).strip()
@@ -2155,10 +2236,15 @@ async def cmd_memory(msg: Message):
     gender = mem.get_gender(u)
     g_str  = {"f": "девушка 👩", "m": "парень 👦"}.get(gender or "", "неизвестно 🤷")
     base   = f"пол: {g_str}"
-    if not facts:
+    # Фильтруем fallback-мусор из фактов
+    _fb_set = set(_ALIVE_FALLBACKS) | {"ща погоди", "...", "мозг завис", "сервак упал, подожди немного",
+                   "не могу ответить прямо щас, чуть позже ок?", "чот тормозю, попробуй ещё раз",
+                   "у меня щас мозг завис, напиши чуть позже"}
+    clean_facts = [f for f in facts if f.strip() not in _fb_set and len(f.strip()) > 5]
+    if not clean_facts:
         await msg.answer(f"{base}\nничо больше не знаю")
     else:
-        lines = "\n".join(f"* {f}" for f in facts)
+        lines = "\n".join(f"* {f}" for f in clean_facts)
         await msg.answer(f"{base}\n\nзадоксила:\n{lines}")
 
 
@@ -2824,14 +2910,28 @@ async def on_video(msg: Message, aiohttp_session: aiohttp.ClientSession):
             except Exception: pass
 
         if is_circle:
-            # Кружок — пробуем транскрипт, НЕ показываем статус и НЕ показываем транскрипт
+            # Кружок — транскрибируем аудио, реагируем с контекстом что это было видео
             try:
                 raw_video = await dl(video.file_id)
                 text      = await ai_transcribe(aiohttp_session, raw_video, "circle.mp4")
                 if text and text.strip():
                     _auto_gender(u, text)
                     mem.reset_sticker_streak(u)
-                    answer = await ai_chat(aiohttp_session, u, text)
+                    # Передаём с контекстом — мурка знает что это был кружок со звуком
+                    if img_b64:
+                        # Есть превью кадра — используем vision чтобы видела и картинку и слышала
+                        circle_prompt = (
+                            f"тебе прислали кружок-видео. ты посмотрела его и услышала что человек говорит: "
+                            f"«{text.strip()}». вот как он выглядел на видео — реагируй на всё вместе: "
+                            f"и на то что сказал, и на то что видно."
+                        )
+                        answer = await ai_vision(aiohttp_session, u, circle_prompt, img_b64, "image/jpeg")
+                    else:
+                        circle_prompt = (
+                            f"тебе прислали кружок-видео. ты посмотрела и услышала: «{text.strip()}». "
+                            f"отреагируй в своём стиле — как будто только что посмотрела это видео."
+                        )
+                        answer = await ai_chat(aiohttp_session, u, circle_prompt)
                     stop.set()
                     answer = await maybe_send_sticker(msg, answer)
                     await send_smart(msg, answer)
@@ -2847,10 +2947,12 @@ async def on_video(msg: Message, aiohttp_session: aiohttp.ClientSession):
             )
             answer = await ai_vision(aiohttp_session, u, prompt, img_b64, "image/jpeg")
         else:
+            # Нет превью — реагируем как живой человек который видит что что-то прислали
+            # НЕ говорим что не можем посмотреть — просто реагируем на факт
             prompt = (
-                ("тебе скинули кружок" if is_circle else "тебе скинули видео") +
+                ("тебе скинули кружок-видео" if is_circle else "тебе скинули видео") +
                 (f" с подписью '{caption}'" if caption else "") +
-                ". отреагируй в своём стиле."
+                ". отреагируй в своём стиле — коротко и живо. можешь спросить что там или просто эмоция."
             )
             answer = await ai_chat(aiohttp_session, u, prompt)
 
@@ -2867,6 +2969,158 @@ async def on_video(msg: Message, aiohttp_session: aiohttp.ClientSession):
 # ══════════════════════════════════════════════════════════════════════════════
 # WEB SEARCH (DuckDuckGo)
 # ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# YOUTUBE / TIKTOK / VIDEO LINK HANDLER
+# ══════════════════════════════════════════════════════════════════════════════
+_YT_RE = re.compile(
+    r"https?://(?:www\.)?(?:"
+    r"youtube\.com/watch\S+|"
+    r"youtu\.be/\S+|"
+    r"youtube\.com/shorts/\S+|"
+    r"tiktok\.com/\S+|"
+    r"vm\.tiktok\.com/\S+|"
+    r"vt\.tiktok\.com/\S+"
+    r")",
+    re.I
+)
+
+
+async def _yt_get_meta(session: aiohttp.ClientSession, url: str) -> dict:
+    """Получает title + description через oEmbed (YouTube) или страницу (TikTok)."""
+    meta = {"title": "", "description": "", "author": ""}
+    try:
+        # YouTube oEmbed — официальный, всегда работает
+        if "youtu" in url:
+            from urllib.parse import quote
+            oe_url = f"https://www.youtube.com/oembed?url={quote(url)}&format=json"
+            async with session.get(oe_url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    meta["title"] = d.get("title", "")
+                    meta["author"] = d.get("author_name", "")
+        # TikTok oEmbed
+        elif "tiktok" in url:
+            from urllib.parse import quote
+            oe_url = f"https://www.tiktok.com/oembed?url={quote(url)}"
+            async with session.get(oe_url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    meta["title"] = d.get("title", "")
+                    meta["author"] = d.get("author_name", "")
+    except Exception as e:
+        log.debug("yt_get_meta fail: %s", e)
+    return meta
+
+
+async def _cobalt_download_audio(session: aiohttp.ClientSession, url: str) -> bytes | None:
+    """Скачивает аудио через cobalt.tools API (бесплатный, без ключа)."""
+    cobalt_instances = [
+        "https://cobalt.tools",
+        "https://co.wuk.sh",
+    ]
+    for base in cobalt_instances:
+        try:
+            async with session.post(
+                f"{base}/api/json",
+                json={"url": url, "isAudioOnly": True, "aFormat": "ogg",
+                      "vQuality": "144", "disableMetadata": True},
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    status = d.get("status", "")
+                    dl_url = d.get("url") or (d.get("audio") if status == "stream" else None)
+                    if not dl_url and status in ("redirect", "stream", "tunnel", "picker"):
+                        dl_url = d.get("url")
+                    if dl_url:
+                        async with session.get(dl_url,
+                            timeout=aiohttp.ClientTimeout(total=60),
+                            headers={"User-Agent": "Mozilla/5.0"},
+                        ) as audio_r:
+                            if audio_r.status == 200:
+                                data = await audio_r.read()
+                                if len(data) > 10000:
+                                    log.info("cobalt audio OK size=%d from %s", len(data), base)
+                                    return data
+        except Exception as e:
+            log.debug("cobalt %s fail: %s", base, e)
+    return None
+
+
+async def handle_video_link(msg: Message, url: str,
+                             session: aiohttp.ClientSession, extra_text: str = "") -> bool:
+    """Обрабатывает ссылку на YouTube/TikTok.
+    Сначала пробует транскрипт, если не вышло — реагирует на метаданные.
+    Возвращает True если успешно обработано."""
+    u = uid(msg)
+    site = "TikTok" if "tiktok" in url.lower() else "YouTube"
+
+    # Параллельно стартуем скачивание и получение мета
+    meta_task = asyncio.create_task(_yt_get_meta(session, url))
+    audio_task = asyncio.create_task(_cobalt_download_audio(session, url))
+
+    meta = await meta_task
+    title = meta.get("title", "")
+    author = meta.get("author", "")
+
+    # Ждём аудио (но не дольше 45 сек)
+    audio_bytes = None
+    try:
+        audio_bytes = await asyncio.wait_for(asyncio.shield(audio_task), timeout=45)
+    except asyncio.TimeoutError:
+        log.info("cobalt audio timeout для %s", url)
+        audio_task.cancel()
+    except Exception as e:
+        log.warning("cobalt audio error: %s", e)
+
+    transcript = ""
+    if audio_bytes:
+        try:
+            transcript = await ai_transcribe(session, audio_bytes, "audio.ogg")
+        except Exception as e:
+            log.warning("yt transcribe fail: %s", e)
+
+    # Строим промпт
+    if transcript and len(transcript.strip()) > 20:
+        # Есть транскрипт — мурка реально "посмотрела" видео
+        parts = []
+        if title:
+            parts.append(f"название: «{title}»")
+        if author:
+            parts.append(f"автор: {author}")
+        ctx = ", ".join(parts)
+        prompt = (
+            f"тебе прислали ссылку на {site}{f' ({ctx})' if ctx else ''}. "
+            f"ты посмотрела и послушала видео. вот что там говорится: «{transcript[:1500]}». "
+            + (f"юзер написал к ней: «{extra_text}». " if extra_text else "")
+            + "отреагируй в своём стиле — скажи что думаешь о видео, что зацепило или нет."
+        )
+    elif title:
+        # Только метаданные
+        prompt = (
+            f"тебе прислали ссылку на {site}. "
+            f"название видео: «{title}»"
+            + (f", автор: {author}" if author else "")
+            + (f". юзер написал: «{extra_text}»" if extra_text else "")
+            + ". отреагируй в своём стиле — как будто посмотрела по названию что это такое."
+        )
+    else:
+        # Совсем ничего нет
+        prompt = (
+            f"тебе прислали ссылку на {site}"
+            + (f". юзер написал: «{extra_text}»" if extra_text else "")
+            + ". отреагируй коротко в своём стиле."
+        )
+
+    mem.reset_sticker_streak(u)
+    answer = await ai_chat(session, u, prompt)
+    answer = await maybe_send_sticker(msg, answer)
+    await send_smart(msg, answer)
+    log.info("handle_video_link OK site=%s transcript_len=%d", site, len(transcript))
+    return True
+
+
 _web_search_cache: dict[str, tuple[float, str]] = {}
 
 async def _web_search_ctx(session: aiohttp.ClientSession, query: str) -> str:
@@ -2942,39 +3196,51 @@ async def search_and_send_pic(msg: Message, query: str,
         en_query = await ai_translate_to_en(session, query)
     except Exception:
         en_query = query
-    encoded = quote(en_query or query)
-    seed = random.randint(1, 999999)
-    urls = [
-        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&nofeed=true&model=flux&seed={seed}&safe=false",
-        f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512&nologo=true&nofeed=true&model=turbo&seed={seed}",
-    ]
-    _IMAGE_MAGIC = (
-        b'\xff\xd8\xff',
-        b'\x89PNG',
-        b'GIF8',
-        b'RIFF',
-    )
-    for url in urls:
+    en_q = en_query or query
+
+    # ── Шаг 1: Unsplash (реальные фото) ──
+    if Secrets.UNSPLASH_KEY:
         try:
+            encoded_q = quote(en_q)
             async with session.get(
-                url,
-                timeout=aiohttp.ClientTimeout(total=90),
-                headers={"User-Agent": "Mozilla/5.0"},
-                allow_redirects=True,
+                f"https://api.unsplash.com/search/photos?query={encoded_q}&per_page=5&orientation=landscape",
+                headers={"Authorization": f"Client-ID {Secrets.UNSPLASH_KEY}"},
+                timeout=aiohttp.ClientTimeout(total=15),
             ) as r:
                 if r.status == 200:
-                    data = await r.read()
-                    is_img = (
-                        len(data) > 5000 and
-                        any(data[:4].startswith(m) for m in _IMAGE_MAGIC)
-                    )
-                    if is_img:
-                        await msg.answer_photo(BufferedInputFile(data, "pic.jpg"))
-                        return True
-        except asyncio.TimeoutError:
-            log.warning("search_and_send_pic timeout")
+                    data = await r.json()
+                    results = data.get("results", [])
+                    if results:
+                        pick = random.choice(results[:5])
+                        img_url = pick["urls"].get("regular") or pick["urls"].get("full")
+                        if img_url:
+                            async with session.get(img_url,
+                                timeout=aiohttp.ClientTimeout(total=20),
+                                headers={"User-Agent": "Mozilla/5.0"},
+                            ) as img_r:
+                                if img_r.status == 200:
+                                    raw = await img_r.read()
+                                    if _is_image_bytes(raw):
+                                        await msg.answer_photo(BufferedInputFile(raw, "pic.jpg"))
+                                        log.info("search_and_send_pic: Unsplash OK query=%s", query)
+                                        return True
         except Exception as e:
-            log.warning("search_and_send_pic fail: %s", e)
+            log.warning("search_and_send_pic Unsplash fail: %s", e)
+
+    # ── Шаг 2: Together.ai (генерация, если Unsplash не дал) ──
+    img = await _draw_together(session, en_q)
+    if img:
+        await msg.answer_photo(BufferedInputFile(img, "pic.jpg"))
+        log.info("search_and_send_pic: Together OK query=%s", query)
+        return True
+
+    # ── Шаг 3: Pollinations fallback ──
+    img = await _draw_pollinations(session, en_q)
+    if img:
+        await msg.answer_photo(BufferedInputFile(img, "pic.jpg"))
+        log.info("search_and_send_pic: Pollinations OK query=%s", query)
+        return True
+
     return False
 
 
@@ -2993,6 +3259,20 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
     asyncio.create_task(_typing_loop(msg.chat.id, stop))
 
     try:
+        # ── YouTube / TikTok ссылки ──
+        yt_match = _YT_RE.search(text)
+        if yt_match:
+            url = yt_match.group(0).rstrip(".,!?)")
+            extra = text.replace(url, "").strip()
+            try:
+                await handle_video_link(msg, url, aiohttp_session, extra_text=extra)
+            except Exception as e:
+                log.warning("handle_video_link fail: %s", e)
+                await msg.answer(random.choice(["не смогла открыть видео", "ссылка не открывается"]))
+            finally:
+                stop.set()
+            return
+
         # ИСПРАВЛЕНО: "нарисуй ..." — обрабатываем здесь, без отдельного хендлера
         draw_inline = re.match(r"(?i)^нарисуй\s+.+", text)
         if draw_inline:
@@ -3268,21 +3548,27 @@ async def on_reaction(event: MessageReactionUpdated, aiohttp_session: aiohttp.Cl
                 f"юзер поставил реакцию {emoji_str} на твоё сообщение: «{last_bot_msg[:200]}»\n"
                 f"отреагируй на это коротко в своём стиле — 1 предложение максимум. "
                 f"это должно быть органично: типа ты видишь реакцию и что-то думаешь по этому поводу. "
-                f"НЕ пиши 'ты поставил реакцию' или 'я вижу реакцию' — просто живо отреагируй."
+                f"НЕ пиши 'ты поставил реакцию' или 'я вижу реакцию' — просто живо отреагируй. "
+                f"НЕ используй теги [СТИКЕР:] или [ГИФКА:] в этом ответе."
             )
         else:
             prompt = (
                 f"юзер поставил реакцию {emoji_str} на одно из твоих сообщений. "
-                f"отреагируй коротко в своём стиле — 1 предложение. живо и органично."
+                f"отреагируй коротко в своём стиле — 1 предложение. живо и органично. "
+                f"НЕ используй теги [СТИКЕР:] или [ГИФКА:] в этом ответе."
             )
 
         answer = await ai_chat(aiohttp_session, uid_str, prompt)
         if answer and answer not in _FALLBACKS:
-            await bot.send_message(
-                chat_id,
-                answer,
-                reply_parameters=ReplyParameters(message_id=msg_id),
-            )
+            # Создаём фиктивный объект чтобы прогнать через maybe_send_sticker
+            # напрямую очищаем теги стикеров из ответа реакции
+            answer = re.sub(r"\[(СТИКЕР|ГИФКА):\s*[^\]]+\]", "", answer, flags=re.I).strip()
+            if answer:
+                await bot.send_message(
+                    chat_id,
+                    answer,
+                    reply_parameters=ReplyParameters(message_id=msg_id),
+                )
     except Exception:
         log.exception("on_reaction")
 
