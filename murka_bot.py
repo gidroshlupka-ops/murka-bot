@@ -292,6 +292,13 @@ class KeyManager:
     def all_banned(self) -> bool:
         return all(self._is_banned(i) for i in range(len(self._pool)))
 
+    def all_rpd_banned(self) -> bool:
+        """True если все ключи в долгом бане (RPD >60м) — смысла ждать нет, сразу OR."""
+        now = time.monotonic()
+        if not self._pool:
+            return True
+        return all(self._cooldown.get(i, 0) - now > 3600 for i in range(len(self._pool)))
+
     def next_cooldown_end(self) -> float:
         now   = time.monotonic()
         times = [self._cooldown.get(i, 0) for i in range(len(self._pool))]
@@ -988,27 +995,29 @@ async def _gemini_post(session: aiohttp.ClientSession,
     if system_text:
         body["system_instruction"] = {"parts": [{"text": system_text}]}
 
+    # Быстрая проверка — если все ключи в RPD (>1ч), не пытаемся вообще
+    if _keys.all_rpd_banned():
+        log.warning("Все Gemini ключи в RPD-бане, сразу OR")
+        return ""
+
     max_key_switches = len(_keys._pool)
     switched = 0
     local_attempt = 0
 
-    idx, key = _keys.pick_best(req_type)
-    if idx == -1 or not key:
-        end = _keys.next_cooldown_end()
-        wait = end - time.monotonic()
-        if wait >= 600:
-            log.warning("Все Gemini ключи на бане (%.0fс), переход на OR", wait)
-            return ""
-        await asyncio.sleep(min(wait + 1.0, 30))
-
     while switched <= max_key_switches:
+        # Если все ушли в RPD прямо во время цикла — не продолжаем
+        if _keys.all_rpd_banned():
+            log.warning("Все Gemini ключи ушли в RPD во время цикла, переход на OR")
+            return ""
+
         idx, key = _keys.pick_best(req_type)
 
         if idx == -1 or not key:
             end  = _keys.next_cooldown_end()
             wait = end - time.monotonic()
+            # Ждём только если это короткий RPM-бан (до 10 мин), иначе сразу OR
             if 0 < wait < 600:
-                log.info("Все Gemini ключи на кулдауне, жду %.1fs", wait)
+                log.info("Все Gemini ключи на RPM-кулдауне, жду %.1fs", wait)
                 await asyncio.sleep(min(wait + 1.0, 30))
                 idx, key = _keys.pick_best(req_type)
             if idx == -1 or not key:
@@ -2196,6 +2205,17 @@ async def cmd_keystatus(msg: Message):
         or_bad = [m.split("/")[-1].replace(":free","") for m in Secrets.OR_FALLBACK_MODELS if _or_is_model_banned(m)]
         or_emoji = "✅" if or_left > 50 and or_ok else "⚠️"
         lines.append(f"{or_emoji} OR: {_or_daily_count}/{_OR_DAILY_LIMIT} | живые: {', '.join(or_ok) or '—'}{(' | 💀 ' + ', '.join(or_bad)) if or_bad else ''}")
+
+    # Когда разбанится ближайший ключ
+    if not free_idxs and (rpm_bans or rpd_bans):
+        nearest_end = _keys.next_cooldown_end()
+        if nearest_end:
+            wait_sec = nearest_end - time.monotonic()
+            if wait_sec > 0:
+                h_w = int(wait_sec // 3600)
+                m_w = int((wait_sec % 3600) // 60)
+                label = f"{h_w}ч {m_w}м" if h_w else f"{m_w}м"
+                lines.append(f"⏰ Ближайший разбан: через {label}")
 
     # HF Space
     hf = "✅" if _hf_space_alive else ("❌" if _hf_space_alive is False else "❓")
