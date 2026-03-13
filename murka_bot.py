@@ -3236,7 +3236,7 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
 
     try:
         if sticker.is_animated or sticker.is_video:
-            # Пробуем достать превью анимированного стикера
+            # Пробуем достать превью анимированного/видео стикера
             anim_b64 = None
             thumb = getattr(sticker, "thumbnail", None) or getattr(sticker, "thumb", None)
             if thumb:
@@ -3246,6 +3246,32 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
                         anim_b64 = base64.b64encode(raw_thumb).decode()
                 except Exception as e:
                     log.warning("anim sticker thumb fail: %s", e)
+
+            # Для видео-стикеров (.webm) — пробуем скачать и извлечь кадр через ffmpeg
+            if not anim_b64 and sticker.is_video:
+                try:
+                    raw_video = await dl(sticker.file_id)
+                    if raw_video:
+                        frame = await extract_frame_from_video(raw_video, "webm")
+                        if frame:
+                            anim_b64 = base64.b64encode(frame).decode()
+                            log.info("video sticker frame extracted OK")
+                except Exception as e:
+                    log.warning("video sticker frame fail: %s", e)
+
+            # Для анимированных (.tgs) — тоже пробуем скачать тамбнейл через getFile напрямую
+            if not anim_b64 and sticker.is_animated:
+                try:
+                    # Иногда thumbnail доступен только через bot.get_file
+                    from aiogram.types import File as TgFile
+                    tg_file: TgFile = await bot.get_file(sticker.file_id)
+                    # .tgs нельзя напрямую декодировать, но thumbnail может быть отдельным file_id
+                    if sticker.thumbnail:
+                        raw_thumb2 = await dl(sticker.thumbnail.file_id)
+                        if raw_thumb2:
+                            anim_b64 = base64.b64encode(raw_thumb2).decode()
+                except Exception as e:
+                    log.debug("anim sticker extra thumb fail: %s", e)
 
             if anim_b64:
                 # Видим превью — используем vision
@@ -3261,13 +3287,14 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
                         try: await msg.answer_sticker(pick["file_id"])
                         except Exception: pass
                         return
+                anim_type = "видео-стикер" if sticker.is_video else "анимированный стикер"
                 prompt = (
-                    f"тебе скинули анимированный стикер {sticker_emoji}: {desc_short}. "
+                    f"тебе скинули {anim_type} {sticker_emoji}: {desc_short}. "
                     + (f"из пака '{sticker_set_name}'. " if sticker_set_name else "")
                     + "отреагируй в своём стиле — коротко и живо."
                 )
             else:
-                # Нет превью — по эмодзи
+                # Нет превью — реагируем по эмодзи + просим AI описать что это за эмодзи
                 if mem.vault_size() > 0 and random.random() < 0.08:
                     pick = mem.random_sticker("sticker") or mem.random_sticker()
                     if pick:
@@ -3275,10 +3302,13 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
                         try: await msg.answer_sticker(pick["file_id"])
                         except Exception: pass
                         return
+                anim_type = "видео-стикер" if sticker.is_video else "анимированный стикер"
+                emoji_hint = f" (эмодзи: {sticker_emoji})" if sticker_emoji else ""
+                pack_hint  = f" из пака '{sticker_set_name}'" if sticker_set_name else ""
                 prompt = (
-                    f"тебе скинули анимированный стикер {sticker_emoji}. "
-                    + (f"из пака '{sticker_set_name}'. " if sticker_set_name else "")
-                    + "отреагируй коротко в своём стиле — прояви эмоцию."
+                    f"тебе скинули {anim_type}{emoji_hint}{pack_hint}. "
+                    f"ты не можешь видеть саму анимацию, но судя по эмодзи {sticker_emoji} примерно понимаешь настроение. "
+                    + "отреагируй коротко в своём стиле — прояви эмоцию, можешь пошутить про стикер."
                 )
             answer = await ai_chat(aiohttp_session, u, prompt)
             stop.set()
