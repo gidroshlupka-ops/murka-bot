@@ -127,20 +127,18 @@ class Secrets:
         "https://image.pollinations.ai/prompt/{prompt}"
         "?width=1024&height=1024&nologo=true&enhance=true&model=flux"
     )
-    MODEL_CHAT:    str = "google/gemini-2.5-flash"
-    MODEL_VISION:  str = "google/gemini-2.5-flash"
-    MODEL_CHAT_HEAVY: str = "google/gemini-2.5-flash"
+    MODEL_CHAT:    str = "google/gemini-2.5-flash-lite"
+    MODEL_VISION:  str = "google/gemini-2.5-flash-lite"  # flash даёт только 20 RPD, lite — 1000 RPD
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
     # OR fallback список — пробуем по очереди
     OR_FALLBACK_MODELS: list[str] = [
-        "google/gemma-3-27b-it:free",
         "meta-llama/llama-3.3-70b-instruct:free",
         "mistralai/mistral-small-3.1-24b-instruct:free",
-        "qwen/qwen3-8b:free",
-        "microsoft/phi-4-reasoning-plus:free",
-        "tngtech/deepseek-r1t-chimera:free",
+        "mistralai/mistral-7b-instruct:free",
+        "huggingfaceh4/zephyr-7b-beta:free",
+        "openchat/openchat-7b:free",
     ]
-    MODEL_FALLBACK_OR: str = "google/gemma-3-27b-it:free"
+    MODEL_FALLBACK_OR: str = "meta-llama/llama-3.3-70b-instruct:free"
     # HF Space для RVC
     HF_SPACE_BASE: str = os.environ.get(
         "HF_SPACE_URL", "https://wqyuetasdasd-murka-rvc-inference.hf.space"
@@ -1365,8 +1363,6 @@ async def ai_chat(session: aiohttp.ClientSession, uid_str: str, text: str,
     system  = _build_system(uid_str)
     if extra_context:
         system += f"\n\n[файл от юзера]\n{extra_context}"
-
-
     if reply_context:
         system += f"\n\n{reply_context}"
     messages = [{"role": "system", "content": system}] + history + \
@@ -3240,19 +3236,50 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
 
     try:
         if sticker.is_animated or sticker.is_video:
-            if mem.vault_size() > 0 and random.random() < 0.08:
-                pick = mem.random_sticker("sticker") or mem.random_sticker()
-                if pick:
-                    stop.set()
-                    try: await msg.answer_sticker(pick["file_id"])
-                    except Exception: pass
-                    return
-            prompt = (
-                f"тебе скинули стикер {sticker_emoji}. "
-                + (f"из пака '{sticker_set_name}'. " if sticker_set_name else "")
-                + "отреагируй коротко в своём стиле, 1-2 предложения. это живой стикер/гифка, "
-                + "прояви эмоции — смешно тебе, странно, мило, или как-то ещё."
-            )
+            # Пробуем достать превью анимированного стикера
+            anim_b64 = None
+            thumb = getattr(sticker, "thumbnail", None) or getattr(sticker, "thumb", None)
+            if thumb:
+                try:
+                    raw_thumb = await dl(thumb.file_id)
+                    if raw_thumb:
+                        anim_b64 = base64.b64encode(raw_thumb).decode()
+                except Exception as e:
+                    log.warning("anim sticker thumb fail: %s", e)
+
+            if anim_b64:
+                # Видим превью — используем vision
+                info = await analyze_sticker_img(aiohttp_session, anim_b64, "image/webp")
+                mem.save_sticker(sticker.file_id, "sticker",
+                                 info["description"], info["emotion"], u,
+                                 info.get("keywords", ""))
+                desc_short = info["description"].split(".")[0]
+                if mem.vault_size() > 0 and random.random() < 0.08:
+                    pick = mem.random_sticker("sticker") or mem.random_sticker()
+                    if pick:
+                        stop.set()
+                        try: await msg.answer_sticker(pick["file_id"])
+                        except Exception: pass
+                        return
+                prompt = (
+                    f"тебе скинули анимированный стикер {sticker_emoji}: {desc_short}. "
+                    + (f"из пака '{sticker_set_name}'. " if sticker_set_name else "")
+                    + "отреагируй в своём стиле — коротко и живо."
+                )
+            else:
+                # Нет превью — по эмодзи
+                if mem.vault_size() > 0 and random.random() < 0.08:
+                    pick = mem.random_sticker("sticker") or mem.random_sticker()
+                    if pick:
+                        stop.set()
+                        try: await msg.answer_sticker(pick["file_id"])
+                        except Exception: pass
+                        return
+                prompt = (
+                    f"тебе скинули анимированный стикер {sticker_emoji}. "
+                    + (f"из пака '{sticker_set_name}'. " if sticker_set_name else "")
+                    + "отреагируй коротко в своём стиле — прояви эмоцию."
+                )
             answer = await ai_chat(aiohttp_session, u, prompt)
             stop.set()
             answer = await maybe_send_sticker(msg, answer, allow_sticker=False)
@@ -3285,10 +3312,12 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
                 return
 
         desc_short = info["description"].split(".")[0]
+        text_hint = f" там написано: '{info['text']}'. " if info.get("text") else ""
         prompt = (
-            f"тебе скинули стикер {sticker_emoji}: {desc_short}. "
+            f"тебе скинули стикер {sticker_emoji}. "
+            f"ты его видишь — на нём: {desc_short}.{text_hint} "
             + (f"из пака '{sticker_set_name}'. " if sticker_set_name else "")
-            + "отреагируй в своём стиле — коротко и живо. что тебе этот стикер напоминает? или просто эмоция."
+            + "отреагируй в своём стиле — коротко и живо."
         )
         answer = await ai_chat(aiohttp_session, u, prompt)
         stop.set()
@@ -3357,10 +3386,11 @@ async def _process_gif(msg: Message, aiohttp_session: aiohttp.ClientSession,
                 return
 
         desc_short = info["description"].split(".")[0]
+        text_hint  = f" на ней написано: '{info['text']}'. " if info.get("text") else ""
         prompt = (
-            f"тебе скинули гифку: {desc_short}. "
-            + (f"с подписью '{caption}'. " if caption else "")
-            + "отреагируй коротко в своём стиле — с эмоцией, живо. что ты думаешь об этой гифке?"
+            f"тебе скинули гифку. ты её видишь — на ней: {desc_short}.{text_hint} "
+            + (f"подпись: '{caption}'. " if caption else "")
+            + "отреагируй коротко в своём стиле — с эмоцией, живо."
         )
     else:
         if streak >= 3 and mem.vault_size() > 0:
