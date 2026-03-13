@@ -10,8 +10,9 @@ from pathlib import Path
 import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
-    Message, BufferedInputFile, BotCommand, BotCommandScopeDefault,
+    Message, BufferedInputFile, BotCommand, BotCommandScopeDefault, BotCommandScopeChat,
     ReplyParameters, MessageReactionUpdated, ReactionTypeEmoji,
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
 )
 from aiogram.filters import CommandStart, Command
 from aiogram.client.default import DefaultBotProperties
@@ -119,6 +120,13 @@ class Secrets:
         int(x.strip()) for x in os.environ.get("ALLOWED_CHAT_IDS", "").split(",")
         if x.strip().lstrip("-").isdigit()
     )
+    # Айди админов — только они видят /keystatus /resetbans /checkrvc
+    ADMIN_IDS: set[int] = set(
+        int(x.strip()) for x in os.environ.get("ADMIN_IDS", "").split(",")
+        if x.strip().lstrip("-").isdigit()
+    )
+    # Именованные юзеры для /relay (env: USER_ВАСЯ=123456, USER_ПЕТЯ=654321)
+    USER_NAMES: dict[str, int] = {}  # заполняется после инициализации
     RVC_API_URL:    str       = os.environ.get("RVC_API_URL", "")
     GEMINI_POOL:    list[str] = [
         k for k in [os.environ.get(f"GEMINI_{i}", "") for i in range(1, 101)] if k
@@ -130,13 +138,13 @@ class Secrets:
     MODEL_CHAT:    str = "google/gemini-2.5-flash-lite"
     MODEL_VISION:  str = "google/gemini-2.5-flash-lite"  # flash даёт только 20 RPD, lite — 1000 RPD
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
-    # OR fallback список — пробуем по очереди
+    # OR fallback список — только рабочие модели (убраны мёртвые endpoints)
     OR_FALLBACK_MODELS: list[str] = [
         "meta-llama/llama-3.3-70b-instruct:free",
         "mistralai/mistral-small-3.1-24b-instruct:free",
-        "mistralai/mistral-7b-instruct:free",
-        "huggingfaceh4/zephyr-7b-beta:free",
-        "openchat/openchat-7b:free",
+        "google/gemma-3-27b-it:free",
+        "google/gemma-3-12b-it:free",
+        "deepseek/deepseek-r1-distill-llama-70b:free",
     ]
     MODEL_FALLBACK_OR: str = "meta-llama/llama-3.3-70b-instruct:free"
     # HF Space для RVC
@@ -147,6 +155,21 @@ class Secrets:
     TOGETHER_KEY: str = os.environ.get("TOGETHER_KEY", "")
     # Unsplash — поиск реальных фото
     UNSPLASH_KEY: str = os.environ.get("UNSPLASH_KEY", "")
+
+
+# Заполняем USER_NAMES из env (формат: USER_ВАСЯ=123456789)
+Secrets.USER_NAMES = {
+    k[5:].lower(): int(v.strip())
+    for k, v in os.environ.items()
+    if k.upper().startswith("USER_") and v.strip().lstrip("-").isdigit()
+}
+
+
+def is_admin(user_id: int) -> bool:
+    """True если юзер — администратор (или ADMIN_IDS пуст — тогда все являются админами)."""
+    if not Secrets.ADMIN_IDS:
+        return True  # если не настроено — все имеют доступ (обратная совместимость)
+    return user_id in Secrets.ADMIN_IDS
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -911,7 +934,7 @@ def _build_system(uid_str: str) -> str:
         )
     facts = mem.get_facts(uid_str)
     if facts:
-        system += "\n\nЧто ты знаешь об этом юзере:\n" + \
+        system += "\n\nЧто ты знаешь об этом юзере (запомни и используй в разговоре):\n" + \
                   "\n".join(f"  * {f}" for f in facts)
     tricks = mem.get_tricks(uid_str)
     if tricks:
@@ -1540,14 +1563,15 @@ async def _draw_pollinations(session: aiohttp.ClientSession, prompt: str) -> byt
     seed = random.randint(1, 999999)
     urls = [
         f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&nofeed=true&model=flux&seed={seed}&safe=false",
-        f"https://image.pollinations.ai/prompt/{encoded}?width=768&height=768&nologo=true&nofeed=true&model=flux&seed={seed}",
-        f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512&nologo=true&nofeed=true&model=turbo&seed={seed}",
+        f"https://image.pollinations.ai/prompt/{encoded}?width=768&height=768&nologo=true&nofeed=true&model=flux-realism&seed={seed}",
+        f"https://image.pollinations.ai/prompt/{encoded}?width=768&height=768&nologo=true&nofeed=true&model=turbo&seed={seed}",
+        f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512&nologo=true&nofeed=true&model=flux&seed={seed}",
     ]
     for i, url in enumerate(urls):
         try:
             log.info("draw pollinations %d: %s", i, url[:90])
             async with session.get(url,
-                timeout=aiohttp.ClientTimeout(total=90),
+                timeout=aiohttp.ClientTimeout(total=120),
                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
                 allow_redirects=True,
             ) as r:
@@ -1564,8 +1588,8 @@ async def _draw_pollinations(session: aiohttp.ClientSession, prompt: str) -> byt
             log.warning("draw pollinations %d timeout", i)
         except Exception as e:
             log.error("draw pollinations %d exc: %s", i, e)
-        if i < 2:
-            await asyncio.sleep(1)
+        if i < len(urls) - 1:
+            await asyncio.sleep(2)
     return None
 
 
@@ -1578,13 +1602,28 @@ async def ai_draw(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
     except Exception:
         en_prompt = clean
     final_prompt = en_prompt or clean
+    log.info("ai_draw: prompt='%s' → en='%s'", clean[:60], final_prompt[:60])
 
-    # Сначала Together.ai (надёжно), потом Pollinations (бесплатный fallback)
+    # Сначала Together.ai (надёжно, но платный)
     result = await _draw_together(session, final_prompt)
     if result:
         return result
-    log.info("draw Together не вышло, пробуем Pollinations")
-    return await _draw_pollinations(session, final_prompt)
+    log.info("ai_draw: Together не вышло, пробуем Pollinations")
+
+    # Pollinations с несколькими моделями
+    result = await _draw_pollinations(session, final_prompt)
+    if result:
+        return result
+
+    # Fallback — пробуем Pollinations с оригинальным русским промтом
+    if final_prompt != clean:
+        log.info("ai_draw: Pollinations EN не вышел, пробуем с RU промтом")
+        result = await _draw_pollinations(session, clean)
+        if result:
+            return result
+
+    log.warning("ai_draw: все методы не дали результата для prompt='%s'", clean[:60])
+    return None
 
 
 async def ai_translate_to_en(session: aiohttp.ClientSession, text: str) -> str:
@@ -1610,13 +1649,28 @@ async def ai_extract_fact(session: aiohttp.ClientSession, uid_str: str, text: st
     if g:
         mem.update_gender(uid_str, g)
 
+    # Быстрые паттерны для имени без API
+    name_match = re.search(
+        r'(?:меня\s+зовут|я\s+[-–]\s*|мои?\s+имя\s*[-–:]\s*)([А-ЯЁA-Z][а-яёa-z]{1,20})',
+        text, re.I
+    )
+    if name_match:
+        name = name_match.group(1).strip()
+        existing = mem.get_facts(uid_str)
+        if not any("имя" in f.lower() or "зовут" in f.lower() for f in existing):
+            mem.add_fact(uid_str, f"имя: {name}")
+            log.info("Запомнила имя [%s]: %s", uid_str, name)
+
     result = await _or_post(session, {
-        "model": Secrets.MODEL_FALLBACK_OR, "max_tokens": 80,
+        "model": Secrets.MODEL_FALLBACK_OR, "max_tokens": 100,
         "messages": [{"role": "user", "content":
-            f"Если в сообщении пользователь сообщает факт о себе "
-            f"(имя, город, работа, увлечение, предпочтение, пол) — ответь одной строкой с фактом. "
-            f"Если пол понятен из контекста (мужские/женские глагольные формы) — тоже укажи: 'пол: мужской' или 'пол: женский'. "
-            f"Если нет никаких фактов — ответь словом НЕТ.\nСообщение: {text[:300]}"}],
+            f"Если в сообщении пользователь сообщает важный факт о себе "
+            f"(имя, возраст, город, работа, учёба, увлечение, хобби, отношения, предпочтения, пол) — "
+            f"ответь одной строкой с фактом в формате 'ключ: значение'. "
+            f"Примеры: 'имя: Саша', 'возраст: 20 лет', 'город: Москва', 'учится на программиста', 'играет в доту'. "
+            f"Если пол понятен из глагольных форм — добавь: 'пол: мужской' или 'пол: женский'. "
+            f"Запоминай только реально важное — то что друг запомнил бы о человеке. "
+            f"Если нет ничего важного — ответь словом НЕТ.\nСообщение: {text[:300]}"}],
     })
     _bad = {"ща погоди", "...", "мозг завис", "нет"}
     cleaned = result.strip() if result else ""
@@ -1630,6 +1684,11 @@ async def ai_extract_fact(session: aiohttp.ClientSession, uid_str: str, text: st
     if "пол: женский" in cl or "женский пол" in cl:
         mem.update_gender(uid_str, "f")
         return
+    # Не дублируем факты
+    existing = mem.get_facts(uid_str)
+    cleaned_key = cleaned.split(":")[0].lower().strip() if ":" in cleaned else ""
+    if cleaned_key and any(cleaned_key in f.lower() for f in existing):
+        return  # уже знаем этот тип факта
     mem.add_fact(uid_str, cleaned)
 
 
@@ -1775,6 +1834,22 @@ async def rvc_synthesize(session: aiohttp.ClientSession, text: str) -> bytes | N
     model_name = "mashimahimeko_act2_775e_34"
     index_path = "logs/mashimahimeko/mashimahimeko_act2."
 
+    # Пробуем узнать правильный fn_index через Gradio API info
+    if _rvc_fn_cache.get("tts") is None:
+        try:
+            async with session.get(
+                f"{base}/info",
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as r:
+                if r.status == 200:
+                    info_data = await r.json()
+                    named_endpoints = info_data.get("named_endpoints", {})
+                    unnamed = info_data.get("unnamed_endpoints", {})
+                    log.info("Gradio API endpoints: named=%s, unnamed count=%d",
+                             list(named_endpoints.keys())[:5], len(unnamed))
+        except Exception as e:
+            log.debug("Gradio info fail: %s", e)
+
     data_v1 = [
         text, tts_voice, 0,
         6, "rmvpe", 0.75, 3, 0.25, 0.33, 128,
@@ -1785,15 +1860,20 @@ async def rvc_synthesize(session: aiohttp.ClientSession, text: str) -> bytes | N
         0, f"logs/weights/{model_name}", index_path,
         6, "rmvpe", 0.75, 3, 0.25, 0.33, 128, "wav",
     ]
+    data_v3 = [
+        text, tts_voice,
+        f"logs/weights/{model_name}", index_path,
+        0, 6, "rmvpe", 0.75, 3, 0.25, 0.33, 128,
+    ]
 
     cached_fn = _rvc_fn_cache.get("tts")
     candidates = []
     if cached_fn is not None:
-        candidates = [(cached_fn, data_v1), (cached_fn, data_v2)]
+        candidates = [(cached_fn, data_v1), (cached_fn, data_v2), (cached_fn, data_v3)]
     for fn in [8, 7, 10, 11, 12, 4, 5, 6, 3, 13, 14, 15, 2, 1, 0]:
         if cached_fn is not None and fn == cached_fn:
             continue
-        candidates += [(fn, data_v1), (fn, data_v2)]
+        candidates += [(fn, data_v1), (fn, data_v2), (fn, data_v3)]
 
     for fn_idx, data in candidates:
         result = await _applio_gradio_call(session, fn_idx, data, base, timeout=180)
@@ -1972,32 +2052,29 @@ async def maybe_send_sticker(msg: Message, answer: str,
     u_key = str(msg.chat.id)
     _sticker_msg_counter[u_key] = _sticker_msg_counter.get(u_key, 0) + 1
     msgs_since_last = _sticker_msg_counter[u_key]
-    min_gap = random.randint(8, 14)
+    min_gap = random.randint(10, 16)
 
     # Вычисляем текст без тега ДО всего
     answer_without_tag = re.sub(r"\[(СТИКЕР|ГИФКА):\s*[^\]]+\]", "", answer, flags=re.I).strip()
 
-    # Если AI явно обещает что-то скинуть — форсируем отправку вне зависимости от counter
-    _PROMISE_WORDS = re.compile(
-        r"\b(ну лови|лови|держи|вот лови|на вот|смотри что нашла|скидываю|кидаю|кину|вот гифка|вот стикер)\b",
-        re.I
-    )
-    force_send = bool(match and _PROMISE_WORDS.search(answer_without_tag))
+    # Убираем "на/держи/вот/лови" когда AI добавляет их только как предисловие к стикеру
+    _STICKER_STUB_WORDS = {"на", "вот", "держи", "лови", "смотри", "гляди", "ну", "да", "хм",
+                           "нате", "получи", "вот тебе"}
 
+    # can_send — только если счётчик набрал нужное количество (NOT форсируем по словам)
     can_send = (
         allow_sticker
         and match
         and mem.vault_size() > 0
-        and (msgs_since_last >= min_gap or force_send)
+        and msgs_since_last >= min_gap
     )
 
-    # Если после удаления тега остаётся только заглушка — не шлём (но force_send переопределяет)
-    _STICKER_STUB_WORDS = {"на", "вот", "держи", "лови", "смотри", "гляди", "ну", "да", "хм"}
+    # Если текст — только заглушка-предисловие к стикеру, убираем и её
     remaining_words = set(answer_without_tag.lower().split())
-    text_is_stub = (len(answer_without_tag) < 10 and remaining_words.issubset(_STICKER_STUB_WORDS)
-                    and not force_send)
+    text_is_stub = (len(answer_without_tag) < 12
+                    and remaining_words.issubset(_STICKER_STUB_WORDS))
 
-    if can_send and not text_is_stub:
+    if can_send:
         tags    = match.group(1).strip()
         results = mem.find_stickers(tags, file_type=file_type, limit=5)
         if not results:
@@ -2012,10 +2089,11 @@ async def maybe_send_sticker(msg: Message, answer: str,
                 _sticker_msg_counter[u_key] = 0
                 _sticker_last_sent[u_key] = time.time()
                 log.info("Стикер отправлен uid=%s tags=%s", u_key, tags)
+                # Если текст — только заглушка, не дублируем его после стикера
+                if text_is_stub:
+                    return ""
             except Exception as e:
                 log.warning("Стикер не отправился: %s", e)
-    elif can_send and text_is_stub:
-        log.info("Стикер пропущен (текст-заглушка='%s') uid=%s", answer_without_tag, u_key)
 
     return answer_without_tag
 
@@ -2751,6 +2829,8 @@ async def cmd_memory(msg: Message):
 
 @dp.message(Command("keystatus"))
 async def cmd_keystatus(msg: Message):
+    if not is_admin(msg.from_user.id if msg.from_user else 0):
+        return  # молча игнорируем для не-админов
     now = time.monotonic()
     n = len(_keys._pool)
     rpm_bans, rpd_bans, free_idxs = [], [], []
@@ -2813,6 +2893,8 @@ async def cmd_keystatus(msg: Message):
 
 @dp.message(Command("resetbans"))
 async def cmd_resetbans(msg: Message):
+    if not is_admin(msg.from_user.id if msg.from_user else 0):
+        return
     """Сбрасывает все баны Gemini-ключей и OR-моделей. Используй если баны были ошибочными."""
     # Считаем сколько было
     now_m = time.monotonic()
@@ -2860,6 +2942,8 @@ async def cmd_resetbans(msg: Message):
 
 @dp.message(Command("checkrvc"))
 async def cmd_checkrvc(msg: Message, aiohttp_session: aiohttp.ClientSession):
+    if not is_admin(msg.from_user.id if msg.from_user else 0):
+        return
     base = Secrets.HF_SPACE_BASE
     status = await msg.answer("проверяю HF space...")
     lines = [f"🔗 {base}"]
@@ -2888,6 +2972,89 @@ async def cmd_checkrvc(msg: Message, aiohttp_session: aiohttp.ClientSession):
         await status.edit_text("\n".join(lines))
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# RELAY COMMAND — передать сообщение другому юзеру
+# ══════════════════════════════════════════════════════════════════════════════
+_relay_waiting: dict[str, dict] = {}  # uid -> {target_id, target_name}
+
+
+@dp.message(Command("relay"))
+async def cmd_relay(msg: Message, aiohttp_session: aiohttp.ClientSession):
+    u = uid(msg)
+    if not Secrets.USER_NAMES:
+        await msg.answer("нет настроенных юзеров (добавь USER_ИМЯ=chat_id в env)")
+        return
+
+    # Если написали /relay имя сообщение сразу — обрабатываем напрямую
+    args_text = (msg.text or "").split(None, 1)[1].strip() if msg.text and len(msg.text.split(None, 1)) > 1 else ""
+    if args_text:
+        parts = args_text.split(None, 1)
+        name_try = parts[0].lower().strip("@")
+        text_try = parts[1].strip() if len(parts) > 1 else ""
+        if name_try in Secrets.USER_NAMES and text_try:
+            target_id = Secrets.USER_NAMES[name_try]
+            await _do_relay(msg, aiohttp_session, u, target_id, name_try, text_try)
+            return
+
+    # Показываем inline кнопки с именами
+    buttons = [
+        [InlineKeyboardButton(
+            text=name.capitalize(),
+            callback_data=f"relay_pick:{name}"
+        )]
+        for name in Secrets.USER_NAMES.keys()
+    ]
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await msg.answer("кому передать?", reply_markup=kb)
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("relay_pick:"))
+async def relay_pick_callback(call: CallbackQuery):
+    name = call.data.split(":", 1)[1]
+    if name not in Secrets.USER_NAMES:
+        await call.answer("юзер не найден", show_alert=True)
+        return
+
+    u = f"tg:{call.from_user.id}"
+    _relay_waiting[u] = {"target_id": Secrets.USER_NAMES[name], "target_name": name}
+
+    await call.message.edit_text(
+        f"ок, передаю <b>{name.capitalize()}</b> — чо написать?",
+    )
+    await call.answer()
+
+
+async def _do_relay(
+    msg: Message,
+    session: aiohttp.ClientSession,
+    from_uid: str,
+    target_id: int,
+    target_name: str,
+    relay_text: str,
+):
+    """Перефразирует сообщение и отправляет целевому юзеру."""
+    prompt = (
+        f"тебя попросили передать сообщение пользователю по имени {target_name}. "
+        f"вот что нужно передать: «{relay_text}». "
+        f"напиши ему это от себя — живо, в своём стиле, как будто сама решила написать. "
+        f"можешь добавить 'тут тебе кое-что передали' или 'птички напели' или придумай сама. "
+        f"не пиши от чьего имени, просто живое сообщение."
+    )
+    try:
+        relay_answer = await ai_chat(session, from_uid, prompt)
+        if relay_answer and relay_answer not in _FALLBACKS:
+            await bot.send_message(target_id, relay_answer)
+            await msg.answer(random.choice([
+                "передала 📨", "ок, написала ему", "сделано", "передала, дальше не моё дело"
+            ]))
+            log.info("relay: from=%s to=%d text='%s'", from_uid, target_id, relay_text[:60])
+        else:
+            await msg.answer("чот не смогла придумать как написать, попробуй ещё раз")
+    except Exception as e:
+        log.error("relay send fail to=%d: %s", target_id, e)
+        await msg.answer("не смогла доставить, что-то пошло не так")
+
+
 # ИСПРАВЛЕНО: on_draw_inline убран отдельный хендлер — теперь "нарисуй..." обрабатывается
 # внутри on_text через проверку в начале хендлера. Это фикс главного бага — F.text.regexp
 # никогда не срабатывал потому что F.text регался раньше.
@@ -2900,10 +3067,11 @@ async def cmd_draw(msg: Message, aiohttp_session: aiohttp.ClientSession):
     if inline_prompt:
         stop = asyncio.Event()
         asyncio.create_task(_upload_photo_loop(msg.chat.id, stop))
+        img = None
         try:
-            img = await asyncio.wait_for(ai_draw(aiohttp_session, inline_prompt), timeout=90)
+            img = await asyncio.wait_for(ai_draw(aiohttp_session, inline_prompt), timeout=150)
         except asyncio.TimeoutError:
-            img = None
+            log.warning("cmd_draw timeout for prompt='%s'", inline_prompt[:60])
         finally:
             stop.set()
         if img:
@@ -3236,7 +3404,7 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
 
     try:
         if sticker.is_animated or sticker.is_video:
-            # Пробуем достать превью анимированного/видео стикера
+            # Пробуем достать превью анимированного стикера
             anim_b64 = None
             thumb = getattr(sticker, "thumbnail", None) or getattr(sticker, "thumb", None)
             if thumb:
@@ -3246,32 +3414,6 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
                         anim_b64 = base64.b64encode(raw_thumb).decode()
                 except Exception as e:
                     log.warning("anim sticker thumb fail: %s", e)
-
-            # Для видео-стикеров (.webm) — пробуем скачать и извлечь кадр через ffmpeg
-            if not anim_b64 and sticker.is_video:
-                try:
-                    raw_video = await dl(sticker.file_id)
-                    if raw_video:
-                        frame = await extract_frame_from_video(raw_video, "webm")
-                        if frame:
-                            anim_b64 = base64.b64encode(frame).decode()
-                            log.info("video sticker frame extracted OK")
-                except Exception as e:
-                    log.warning("video sticker frame fail: %s", e)
-
-            # Для анимированных (.tgs) — тоже пробуем скачать тамбнейл через getFile напрямую
-            if not anim_b64 and sticker.is_animated:
-                try:
-                    # Иногда thumbnail доступен только через bot.get_file
-                    from aiogram.types import File as TgFile
-                    tg_file: TgFile = await bot.get_file(sticker.file_id)
-                    # .tgs нельзя напрямую декодировать, но thumbnail может быть отдельным file_id
-                    if sticker.thumbnail:
-                        raw_thumb2 = await dl(sticker.thumbnail.file_id)
-                        if raw_thumb2:
-                            anim_b64 = base64.b64encode(raw_thumb2).decode()
-                except Exception as e:
-                    log.debug("anim sticker extra thumb fail: %s", e)
 
             if anim_b64:
                 # Видим превью — используем vision
@@ -3287,14 +3429,13 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
                         try: await msg.answer_sticker(pick["file_id"])
                         except Exception: pass
                         return
-                anim_type = "видео-стикер" if sticker.is_video else "анимированный стикер"
                 prompt = (
-                    f"тебе скинули {anim_type} {sticker_emoji}: {desc_short}. "
+                    f"тебе скинули анимированный стикер {sticker_emoji}: {desc_short}. "
                     + (f"из пака '{sticker_set_name}'. " if sticker_set_name else "")
                     + "отреагируй в своём стиле — коротко и живо."
                 )
             else:
-                # Нет превью — реагируем по эмодзи + просим AI описать что это за эмодзи
+                # Нет превью — по эмодзи
                 if mem.vault_size() > 0 and random.random() < 0.08:
                     pick = mem.random_sticker("sticker") or mem.random_sticker()
                     if pick:
@@ -3302,13 +3443,10 @@ async def on_sticker(msg: Message, aiohttp_session: aiohttp.ClientSession):
                         try: await msg.answer_sticker(pick["file_id"])
                         except Exception: pass
                         return
-                anim_type = "видео-стикер" if sticker.is_video else "анимированный стикер"
-                emoji_hint = f" (эмодзи: {sticker_emoji})" if sticker_emoji else ""
-                pack_hint  = f" из пака '{sticker_set_name}'" if sticker_set_name else ""
                 prompt = (
-                    f"тебе скинули {anim_type}{emoji_hint}{pack_hint}. "
-                    f"ты не можешь видеть саму анимацию, но судя по эмодзи {sticker_emoji} примерно понимаешь настроение. "
-                    + "отреагируй коротко в своём стиле — прояви эмоцию, можешь пошутить про стикер."
+                    f"тебе скинули анимированный стикер {sticker_emoji}. "
+                    + (f"из пака '{sticker_set_name}'. " if sticker_set_name else "")
+                    + "отреагируй коротко в своём стиле — прояви эмоцию."
                 )
             answer = await ai_chat(aiohttp_session, u, prompt)
             stop.set()
@@ -3663,6 +3801,27 @@ async def handle_video_link(msg: Message, url: str,
     title  = meta.get("title", "")
     author = meta.get("author", "")
 
+    # Если нет транскрипта и нет заголовка — пробуем через Gemini Vision напрямую с URL
+    if not transcript and not title and "youtu" in url:
+        try:
+            yt_prompt_direct = (
+                f"тебе прислали ссылку на YouTube: {url}. "
+                + (f"юзер написал: {extra_text}. " if extra_text else "")
+                + "притворись что посмотрела, скажи что примерно об этом думаешь по названию/описанию. "
+                + "отреагируй в своём стиле — живо и коротко."
+            )
+            mem.reset_sticker_streak(u)
+            answer = await ai_chat(session, u, yt_prompt_direct)
+            answer = await maybe_send_sticker(msg, answer)
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            await send_smart(msg, answer)
+            return True
+        except Exception as e:
+            log.warning("yt direct fallback fail: %s", e)
+
     # Строим промпт
     if transcript and len(transcript.strip()) > 20:
         parts = []
@@ -3693,7 +3852,7 @@ async def handle_video_link(msg: Message, url: str,
         prompt = (
             f"тебе прислали ссылку на {site}"
             + (f". юзер написал: {extra_text}" if extra_text else "")
-            + ". отреагируй коротко в своём стиле."
+            + f". ссылка: {url[:60]}. спроси у юзера про что это видос, скажи что не смогла сразу открыть."
         )
 
     mem.reset_sticker_streak(u)
@@ -4268,9 +4427,9 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
             asyncio.create_task(_upload_photo_loop(msg.chat.id, draw_stop))
             img = None
             try:
-                img = await asyncio.wait_for(ai_draw(aiohttp_session, text), timeout=90)
+                img = await asyncio.wait_for(ai_draw(aiohttp_session, text), timeout=150)
             except asyncio.TimeoutError:
-                pass
+                log.warning("inline draw timeout: %s", text[:60])
             finally:
                 draw_stop.set()
             if img:
@@ -4310,6 +4469,14 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
             _voice_waiting.discard(u)
             stop.set()
             await _do_voice_synthesis(msg, aiohttp_session, text)
+            return
+
+        # /relay — ждём текст для передачи
+        if u in _relay_waiting:
+            relay_info = _relay_waiting.pop(u)
+            stop.set()
+            await _do_relay(msg, aiohttp_session, u,
+                            relay_info["target_id"], relay_info["target_name"], text)
             return
 
         # /music — ждём аудиофайл
@@ -4386,6 +4553,20 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
         if media_type == "photo":
             query = re.sub(r"(?i)(скинь|кинь|дай|покажи|пришли|отправь).{0,20}(фото|фотк|картинк|пик|изображени|снимок|фотограф)\s*(о|про|с|по|из|где)?\s*", "", text).strip()
             if not query: query = text
+            # Если запрос сложный — просим AI извлечь нормальный поисковый запрос
+            if len(query) > 3:
+                try:
+                    ai_q = await _gemini_post(aiohttp_session, [
+                        {"role": "user", "content":
+                         f"Пользователь просит найти фото: «{text}». "
+                         f"Напиши ТОЛЬКО поисковый запрос на английском (3-6 слов) для поиска этого изображения. "
+                         f"Только запрос, без пояснений."}
+                    ], Secrets.MODEL_CHAT, req_type="chat")
+                    if ai_q and len(ai_q.strip()) < 100 and ai_q.strip() not in _FALLBACKS:
+                        query = ai_q.strip()
+                        log.info("photo search AI query: %s", query)
+                except Exception:
+                    pass
             stop.set()
             draw_stop = asyncio.Event()
             asyncio.create_task(_upload_photo_loop(msg.chat.id, draw_stop))
@@ -4705,18 +4886,31 @@ async def main():
     if not Secrets.OPENROUTER_KEY:
         log.warning("OPENROUTER_KEY не задан — OR fallback недоступен!")
 
-    await bot.set_my_commands([
+    # Команды для обычных пользователей
+    user_commands = [
         BotCommand(command="draw",      description="нарисовать что-нибудь"),
         BotCommand(command="voice",     description="озвучить текст голосом мурки"),
         BotCommand(command="music",     description="спеть песню голосом мурки"),
+        BotCommand(command="relay",     description="передать сообщение другому юзеру"),
         BotCommand(command="forget",    description="сбросить память"),
         BotCommand(command="memory",    description="что я о тебе знаю"),
         BotCommand(command="cancel",    description="отменить текущую команду"),
         BotCommand(command="help",      description="помощь"),
-        BotCommand(command="keystatus", description="статус ключей и серверов"),
-        BotCommand(command="resetbans", description="сбросить все баны ключей"),
-        BotCommand(command="checkrvc",  description="проверить голосовой сервер"),
-    ], scope=BotCommandScopeDefault())
+    ]
+    await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
+
+    # Расширенные команды для админов (если ADMIN_IDS заданы)
+    if Secrets.ADMIN_IDS:
+        admin_commands = user_commands + [
+            BotCommand(command="keystatus", description="статус ключей и серверов"),
+            BotCommand(command="resetbans", description="сбросить все баны ключей"),
+            BotCommand(command="checkrvc",  description="проверить голосовой сервер"),
+        ]
+        for admin_id in Secrets.ADMIN_IDS:
+            try:
+                await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
+            except Exception as e:
+                log.warning("Не смог задать команды для admin %d: %s", admin_id, e)
 
     async with aiohttp.ClientSession() as session:
         dp.update.middleware(SessionMiddleware(session))
