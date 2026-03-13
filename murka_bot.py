@@ -127,8 +127,9 @@ class Secrets:
         "https://image.pollinations.ai/prompt/{prompt}"
         "?width=1024&height=1024&nologo=true&enhance=true&model=flux"
     )
-    MODEL_CHAT:    str = "google/gemini-2.5-flash-lite"
-    MODEL_VISION:  str = "google/gemini-2.5-flash-lite"  # flash даёт только 20 RPD, lite — 1000 RPD
+    MODEL_CHAT:    str = "google/gemini-2.5-flash"
+    MODEL_VISION:  str = "google/gemini-2.5-flash"
+    MODEL_CHAT_HEAVY: str = "google/gemini-2.5-flash"
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
     # OR fallback список — пробуем по очереди
     OR_FALLBACK_MODELS: list[str] = [
@@ -1364,6 +1365,8 @@ async def ai_chat(session: aiohttp.ClientSession, uid_str: str, text: str,
     system  = _build_system(uid_str)
     if extra_context:
         system += f"\n\n[файл от юзера]\n{extra_context}"
+
+
     if reply_context:
         system += f"\n\n{reply_context}"
     messages = [{"role": "system", "content": system}] + history + \
