@@ -213,6 +213,13 @@ class KeyManager:
         until_wall = time.time() + duration
         try:
             with sqlite3.connect(self._BAN_DB) as c:
+                # Не перезаписываем бан если существующий заканчивается позже
+                existing = c.execute(
+                    "SELECT until_ts FROM bans WHERE idx=?", (idx,)
+                ).fetchone()
+                if existing and existing[0] > until_wall:
+                    log.info("KeyManager: бан #%d уже длиннее, не перезаписываем", idx)
+                    return
                 c.execute("INSERT OR REPLACE INTO bans(idx, until_ts) VALUES(?,?)",
                           (idx, until_wall))
         except Exception as e:
@@ -240,7 +247,12 @@ class KeyManager:
         else:
             cd = float(self.COOLDOWN_RPM)
             log.info("Ключ #%d → RPM 429-бан на 65с", idx)
-        self._cooldown[idx] = time.monotonic() + cd
+        new_cd_end = time.monotonic() + cd
+        # Не сокращаем существующий бан если он уже длиннее
+        if self._cooldown.get(idx, 0) >= new_cd_end:
+            log.info("Ключ #%d уже в более длинном бане, пропускаем", idx)
+            return
+        self._cooldown[idx] = new_cd_end
         self._save_ban(idx, cd)
 
     def mark_used(self, idx: int):
@@ -1787,7 +1799,15 @@ async def maybe_send_sticker(msg: Message, answer: str,
         and msgs_since_last >= min_gap
     )
 
-    if can_send:
+    # Вычисляем текст без тега ДО отправки стикера
+    answer_without_tag = re.sub(r"\[(СТИКЕР|ГИФКА):\s*[^\]]+\]", "", answer, flags=re.I).strip()
+
+    # Стоп-слова: если после удаления тега остаётся только связка типа "на"/"вот" — не шлём стикер
+    _STICKER_STUB_WORDS = {"на", "вот", "держи", "лови", "смотри", "гляди", "ну", "да", "хм"}
+    remaining_words = set(answer_without_tag.lower().split())
+    text_is_stub = len(answer_without_tag) < 10 and remaining_words.issubset(_STICKER_STUB_WORDS)
+
+    if can_send and not text_is_stub:
         tags    = match.group(1).strip()
         results = mem.find_stickers(tags, file_type=file_type, limit=5)
         if not results:
@@ -1801,11 +1821,13 @@ async def maybe_send_sticker(msg: Message, answer: str,
                     await msg.answer_animation(pick["file_id"])
                 _sticker_msg_counter[u_key] = 0
                 _sticker_last_sent[u_key] = time.time()
+                log.info("Стикер отправлен uid=%s tags=%s", u_key, tags)
             except Exception as e:
                 log.warning("Стикер не отправился: %s", e)
+    elif can_send and text_is_stub:
+        log.info("Стикер пропущен (текст-заглушка='%s') uid=%s", answer_without_tag, u_key)
 
-    answer = re.sub(r"\[(СТИКЕР|ГИФКА):\s*[^\]]+\]", "", answer, flags=re.I).strip()
-    return answer
+    return answer_without_tag
 
 
 # ══════════════════════════════════════════════════════════════════════════════
