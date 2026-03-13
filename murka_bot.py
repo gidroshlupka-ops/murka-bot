@@ -228,6 +228,11 @@ class KeyManager:
             or "per_day" in body_l
             or "requests_per_day" in body_l
             or ("quota exceeded" in body_l and "free_tier" in body_l)
+            or "daily" in body_l
+            or "quota_exceeded" in body_l
+            or ("quota" in body_l and "exceeded" in body_l)
+            or "resource_exhausted" in body_l
+            or "rate_limit_exceeded" in body_l
         )
         if is_rpd:
             cd = float(self.COOLDOWN_RPD)
@@ -254,8 +259,12 @@ class KeyManager:
             return -1, ""
         n = len(self._pool)
         start = self._type_idx.get(req_type, 0) % n
+        # Текущий свободен — берём его
         if not self._is_banned(start):
             return start, self._pool[start]
+        # Текущий забанен — ищем следующий свободный по кругу и сразу
+        # сохраняем как новый стартовый, чтобы следующий вызов не начинал
+        # снова с того же забаненного индекса
         for offset in range(1, n):
             candidate = (start + offset) % n
             if not self._is_banned(candidate):
@@ -1443,20 +1452,45 @@ async def ai_detect_trick(
             f"Бот сказал: «{prev_bot_msg[:100]}»\n"
             f"Пользователь ответил: «{user_reply[:60]}»\n"
             f"Это подкол/троллинг/ловушка на бота? Если да — опиши подкол ОДНОЙ короткой фразой (до 40 символов). "
-            f"Если нет — ответь НЕТ."}
+            f"Если нет — ответь ТОЛЬКО словом НЕТ."}
     ], Secrets.MODEL_CHAT, req_type="chat")
-    _bad_tricks = set(_FALLBACKS) | {"нет", "no", "none", "да", "нет.", "да."}
+
     cleaned_trick = (result or "").strip()
-    is_real_trick = (
-        cleaned_trick
-        and cleaned_trick.upper() not in ("НЕТ", "ДА", "НЕТ.", "ДА.", "NO", "YES")
-        and cleaned_trick.lower() not in _bad_tricks
-        and 5 < len(cleaned_trick) < 80
-        and not any(fb.lower() in cleaned_trick.lower() for fb in _FALLBACKS)
-    )
-    if is_real_trick:
-        mem.save_trick(uid_str, cleaned_trick)
-        log.info("Подкол запомнен [%s]: %s", uid_str, cleaned_trick)
+
+    # Дроп пустого и слишком короткого
+    if not cleaned_trick or len(cleaned_trick) < 8:
+        return
+
+    # Дроп простых да/нет без описания
+    if re.match(r"(?i)^(да|yes|нет|no)[.,!?\s]*$", cleaned_trick):
+        return
+
+    # Дроп мета-фраз вида "да, это подкол" без реального описания
+    _meta_trick_re = [
+        r"(?i)^да[,.]?\s*(это|вот|точно)?\s*подкол",
+        r"(?i)^это\s*(подкол|троллинг|ловушка)\s*[.,!]?$",
+        r"(?i)^(да[,.]?\s*)?(подкол|троллинг|ловушка)\s*[.,!]?$",
+    ]
+    if any(re.match(p, cleaned_trick) for p in _meta_trick_re):
+        return
+
+    # Дроп fallback строк и стандартного мусора
+    _bad_tricks = set(_FALLBACKS) | {
+        "нет", "no", "none", "да", "нет.", "да.", "yes", "yes.", "да.",
+    }
+    if cleaned_trick.lower() in _bad_tricks:
+        return
+
+    # Дроп слишком длинного
+    if len(cleaned_trick) > 80:
+        return
+
+    # Требуем минимум 3 слова И 15 символов — должно быть реальное описание
+    if len(cleaned_trick.split()) < 3 or len(cleaned_trick) < 15:
+        return
+
+    mem.save_trick(uid_str, cleaned_trick)
+    log.info("Подкол запомнен [%s]: %s", uid_str, cleaned_trick)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
