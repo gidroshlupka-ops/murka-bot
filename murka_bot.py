@@ -2157,52 +2157,50 @@ async def cmd_memory(msg: Message):
 async def cmd_keystatus(msg: Message):
     now = time.monotonic()
     n = len(_keys._pool)
-    banned_short, banned_long, free = [], [], []
+    rpm_bans, rpd_bans, free_idxs = [], [], []
     for i in range(n):
-        until = _keys._cooldown.get(i, 0)
-        if until > now:
-            rem = until - now
-            if rem > 3600:
-                banned_long.append((i, rem))
-            else:
-                banned_short.append((i, rem))
-        else:
-            free.append(i)
-    lines = [f"🔑 Gemini пул: {n} ключей"]
-    lines.append(f"✅ Свободных: {len(free)}")
+        rem = _keys._cooldown.get(i, 0) - now
+        if rem <= 0:
+            free_idxs.append(i)
+        elif rem <= 300:   # ≤5м — RPM
+            rpm_bans.append((i, rem))
+        else:              # >5м — RPD или долгий бан
+            rpd_bans.append((i, rem))
 
-    if banned_short:
-        # RPM — показываем в минутах (до снятия бана)
-        rpm_parts = []
-        for i, r in banned_short[:10]:
-            mins = r / 60
-            if mins < 1:
-                rpm_parts.append(f"#{i}({r:.0f}с)")
-            else:
-                rpm_parts.append(f"#{i}({mins:.1f}м)")
-        lines.append(f"⏳ RPM-кулдаун ({len(banned_short)} шт): " + ", ".join(rpm_parts))
+    # Текущий активный ключ для каждого типа
+    cur_chat      = _keys._type_idx.get("chat", 0) % max(n, 1)
+    cur_vision    = _keys._type_idx.get("vision", 0) % max(n, 1)
+    cur_transcribe= _keys._type_idx.get("transcribe", 0) % max(n, 1)
 
-    if banned_long:
-        # RPD — показываем в часах и минутах
-        rpd_parts = []
-        for i, r in banned_long:
-            h = int(r // 3600)
-            m = int((r % 3600) // 60)
-            rpd_parts.append(f"#{i}({h}ч {m}м)")
-        lines.append(f"🚫 RPD/невалид ({len(banned_long)} шт): " + ", ".join(rpd_parts))
+    lines = []
 
-    lines.append(f"📍 Индексы типов: chat={_keys._type_idx.get('chat',0)%max(n,1)} vision={_keys._type_idx.get('vision',0)%max(n,1)} transcribe={_keys._type_idx.get('transcribe',0)%max(n,1)}")
+    # Строка 1: общий счёт + текущие ключи
+    lines.append(f"🔑 {n} ключей | ✅ свободных: {len(free_idxs)} | 🔄 сейчас: chat=#{cur_chat} vis=#{cur_vision} tr=#{cur_transcribe}")
+
+    # RPM — секунды
+    if rpm_bans:
+        parts = " ".join(f"#{i}({r:.0f}с)" for i, r in sorted(rpm_bans))
+        lines.append(f"⏳ RPM({len(rpm_bans)}): {parts}")
+
+    # RPD — только часы
+    if rpd_bans:
+        parts = " ".join(f"#{i}({r/3600:.1f}ч)" for i, r in sorted(rpd_bans))
+        lines.append(f"🚫 RPD({len(rpd_bans)}): {parts}")
+
+    # OR
     if not Secrets.OPENROUTER_KEY:
-        lines.append("⚠️ OR: ключ не задан")
+        lines.append("⚠️ OR: нет ключа")
     else:
         or_left = max(0, _OR_DAILY_LIMIT - _or_daily_count)
-        lines.append(f"{'✅' if or_left > 50 else '⚠️'} OR fallback: {_or_daily_count}/{_OR_DAILY_LIMIT} ({or_left} осталось)")
-        or_banned = [m for m in Secrets.OR_FALLBACK_MODELS if _or_is_model_banned(m)]
-        or_ok     = [m.split("/")[-1].replace(":free","") for m in Secrets.OR_FALLBACK_MODELS if not _or_is_model_banned(m)]
-        lines.append(f"🦙 OR модели живые: {', '.join(or_ok) or 'все забанены!'}")
-        if or_banned:
-            lines.append(f"💀 OR забанены: {', '.join(m.split('/')[-1] for m in or_banned)}")
-    lines.append(f"🤖 HF Space: {'✅ живой' if _hf_space_alive else ('❌ недоступен' if _hf_space_alive is False else '❓ не проверяли')}")
+        or_ok  = [m.split("/")[-1].replace(":free","") for m in Secrets.OR_FALLBACK_MODELS if not _or_is_model_banned(m)]
+        or_bad = [m.split("/")[-1].replace(":free","") for m in Secrets.OR_FALLBACK_MODELS if _or_is_model_banned(m)]
+        or_emoji = "✅" if or_left > 50 and or_ok else "⚠️"
+        lines.append(f"{or_emoji} OR: {_or_daily_count}/{_OR_DAILY_LIMIT} | живые: {', '.join(or_ok) or '—'}{(' | 💀 ' + ', '.join(or_bad)) if or_bad else ''}")
+
+    # HF Space
+    hf = "✅" if _hf_space_alive else ("❌" if _hf_space_alive is False else "❓")
+    lines.append(f"{hf} HF Space")
+
     await msg.answer("\n".join(lines))
 
 
