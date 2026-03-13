@@ -784,7 +784,54 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 
 ═══ РАЗНООБРАЗИЕ ОТВЕТОВ ═══
 каждый ответ другой. иногда одно слово. иногда развёрнуто. иногда просто эмодзи.
-главное — не шаблонно и не как робот. но всегда ОТВЕЧАЙ. никогда не молчи без причины."""
+главное — не шаблонно и не как робот. но всегда ОТВЕЧАЙ. никогда не молчи без причины.
+
+═══ ФАЙЛЫ — КОГДА ПРОСЯТ СКИНУТЬ ═══
+когда тебя просят создать/скинуть файл — пиши ТОЛЬКО специальный тег в начале ответа:
+[ФАЙЛ:py] — для Python кода
+[ФАЙЛ:js] — для JavaScript
+[ФАЙЛ:ts] — для TypeScript
+[ФАЙЛ:html] — для HTML
+[ФАЙЛ:css] — для CSS
+[ФАЙЛ:json] — для JSON
+[ФАЙЛ:txt] — для текста
+[ФАЙЛ:md] — для Markdown
+[ФАЙЛ:sql] — для SQL
+[ФАЙЛ:sh] — для bash скриптов
+[ФАЙЛ:cpp] — для C++
+[ФАЙЛ:cs] — для C#
+[ФАЙЛ:java] — для Java
+[ФАЙЛ:docx] — для Word документа
+[ФАЙЛ:xlsx] — для Excel таблицы
+[ФАЙЛ:pptx] — для PowerPoint презентации
+[ФАЙЛ:csv] — для CSV таблицы
+
+ПОСЛЕ тега — сразу пиши весь контент файла без лишних слов и без блоков ```.
+для docx/xlsx/pptx — пиши структурированный текст с маркерами:
+  [ЗАГОЛОВОК] текст
+  [ПОДЗАГОЛОВОК] текст
+  [ПАРАГРАФ] текст
+  [ТАБЛИЦА] заголовок1|заголовок2|заголовок3
+  [СТРОКА] данные1|данные2|данные3
+  [СЛАЙД] заголовок слайда
+  [ТЕКСТ] текст на слайде
+  [ПУНКТ] пункт списка
+
+пример для кода:
+пользователь: скинь питон файл с парсером
+ответ: [ФАЙЛ:py]
+# ну тут парсим
+import requests
+...весь код...
+
+пример для docx:
+пользователь: сделай word документ с отчётом
+ответ: [ФАЙЛ:docx]
+[ЗАГОЛОВОК] Отчёт за март 2025
+[ПОДЗАГОЛОВОК] Введение
+[ПАРАГРАФ] текст параграфа...
+
+ВАЖНО: весь файл целиком в одном ответе. без объяснений до тега."""
 
 
 def _build_system(uid_str: str) -> str:
@@ -1925,9 +1972,12 @@ async def maybe_send_sticker(msg: Message, answer: str,
 def _fmt(text: str) -> str:
     def repl_block(m):
         lang = m.group(1).strip() or ""
-        code = html.escape(m.group(2))
-        attr = f' class="language-{lang}"' if lang else ""
-        return f"<pre><code{attr}>{code}</code></pre>"
+        code = html.escape(m.group(2).strip())
+        # Telegram не поддерживает class= атрибуты — используем только <pre><code>
+        # Добавляем имя языка как первую строку комментария для читаемости
+        if lang:
+            code = f"[{lang.upper()}]\n{code}"
+        return f"<pre><code>{code}</code></pre>"
     text = re.sub(r"```(\w*)\n?([\s\S]*?)```", repl_block, text)
     text = re.sub(r"`([^`\n]{1,100})`",
                   lambda m: f"<code>{html.escape(m.group(1))}</code>", text)
@@ -1954,6 +2004,52 @@ async def send_smart(msg: Message, text: str, reply_to_msg_id: int | None = None
     Теперь одиночные \n сохраняются — читаемость текста не ломается.
     """
     if not text or not text.strip():
+        return
+
+    # Если AI вернул тег файла — отправляем файл вместо текста
+    fm = _FILE_TAG_RE.match(text.strip())
+    if fm:
+        ext = fm.group(1).lower()
+        raw_content = fm.group(2).strip()
+        # Убираем обёртку ```lang\n...\n``` если AI всё равно добавил
+        file_content = re.sub(r"^```[\w]*\n?", "", raw_content)
+        file_content = re.sub(r"\n?```\s*$", "", file_content).strip()
+        try:
+            # Умное имя файла — берём первую строку комментария или заголовок
+            smart_name = "murka"
+            if ext in ("py", "js", "ts", "sh", "rb", "php"):
+                # ищем # название или первый def/class
+                m_name = re.search(r"^#\s*([\w\s\-а-яА-Я]{3,40})", file_content, re.M)
+                if m_name:
+                    smart_name = re.sub(r"\s+", "_", m_name.group(1).strip().lower())[:20]
+                else:
+                    m_def = re.search(r"(?:def|class|function)\s+(\w+)", file_content)
+                    if m_def:
+                        smart_name = m_def.group(1).lower()[:20]
+            elif ext in ("html", "md"):
+                m_title = re.search(r"<title>([^<]{2,30})</title>|^#\s+(.{2,30})", file_content, re.M | re.I)
+                if m_title:
+                    t = (m_title.group(1) or m_title.group(2) or "").strip()
+                    smart_name = re.sub(r"[^\w\-а-яА-Я]", "_", t.lower())[:20]
+            elif ext in ("docx", "xlsx", "pptx"):
+                m_h = re.search(r"\[ЗАГОЛОВОК\]\s*(.{2,30})", file_content)
+                if m_h:
+                    smart_name = re.sub(r"[^\w\-а-яА-Я]", "_", m_h.group(1).strip().lower())[:20]
+            smart_name = smart_name.strip("_") or "murka"
+            fname = f"{smart_name}.{ext}"
+
+            if ext == "docx":   data = _build_docx(file_content)
+            elif ext == "xlsx": data = _build_xlsx(file_content)
+            elif ext == "pptx": data = _build_pptx(file_content)
+            else:               data = file_content.encode("utf-8")
+            await msg.answer_document(
+                BufferedInputFile(data, fname),
+                caption=random.choice(["держи", "вот", "на 📎", "готово"]),
+            )
+            log.info("send_smart file sent: %s size=%d", fname, len(data))
+        except Exception as e:
+            log.warning("send_smart file tag fail: %s", e)
+            await msg.answer(text[:4000])
         return
     # Только убираем тройные+ переносы, одиночные и двойные НЕ трогаем
     text = re.sub(r'\n{3,}', '\n\n', text.strip())
@@ -2155,6 +2251,357 @@ async def _upload_photo_loop(chat_id: int, stop: asyncio.Event):
 def _auto_gender(uid_str: str, text: str):
     g = detect_gender(text)
     if g: mem.update_gender(uid_str, g)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FILE GENERATION — создание и отправка файлов по запросу
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Расширения кода и их отображаемые имена
+_CODE_EXTS: dict[str, str] = {
+    "python": "py", "py": "py", "питон": "py",
+    "javascript": "js", "js": "js", "джаваскрипт": "js",
+    "typescript": "ts", "ts": "ts",
+    "html": "html", "хтмл": "html",
+    "css": "css",
+    "json": "json", "джейсон": "json",
+    "sql": "sql", "скл": "sql",
+    "bash": "sh", "shell": "sh", "sh": "sh",
+    "c++": "cpp", "cpp": "cpp", "си++": "cpp",
+    "c": "c",
+    "java": "java", "джава": "java",
+    "kotlin": "kt",
+    "rust": "rs",
+    "go": "go", "golang": "go",
+    "php": "php",
+    "ruby": "rb",
+    "swift": "swift",
+    "markdown": "md", "md": "md",
+    "yaml": "yaml", "yml": "yml",
+    "xml": "xml",
+    "csv": "csv",
+    "txt": "txt", "текст": "txt",
+}
+
+_FILE_REQUEST_RE = re.compile(
+    r"(?i)("
+    r"напиши|создай|сделай|сгенерируй|напишет|скинь|отправь|дай"
+    r").{0,30}("
+    r"скрипт|файл|код|программ|функци|класс|модул|утилит|"
+    r"excel|exel|эксель|xlsx|таблиц|"
+    r"word|ворд|docx|документ|"
+    r"powerpoint|паверпоинт|pptx|презентаци|"
+    r"csv|json|yaml|yml|xml|html|markdown|readme"
+    r")"
+)
+
+_SEND_FILE_RE = re.compile(
+    r"(?i)(скинь|отправь|дай|сохрани).{0,20}(файл|в файле|как файл|файлом)"
+)
+
+
+def _detect_file_request(text: str) -> bool:
+    """True если юзер просит создать/скинуть файл."""
+    return bool(_FILE_REQUEST_RE.search(text) or _SEND_FILE_RE.search(text))
+
+
+def _detect_file_ext(text: str) -> str:
+    """Определяет нужное расширение из текста запроса."""
+    tl = text.lower()
+    # Офис-форматы
+    if any(w in tl for w in ("excel", "exel", "эксель", "xlsx", "таблиц")):
+        return "xlsx"
+    if any(w in tl for w in ("word", "ворд", "docx", "документ")):
+        return "docx"
+    if any(w in tl for w in ("powerpoint", "паверпоинт", "pptx", "презентац")):
+        return "pptx"
+    # Данные
+    if "csv" in tl:
+        return "csv"
+    if "json" in tl:
+        return "json"
+    if any(w in tl for w in ("yaml", "yml")):
+        return "yaml"
+    if "xml" in tl:
+        return "xml"
+    if "html" in tl:
+        return "html"
+    if any(w in tl for w in ("markdown", "readme", ".md")):
+        return "md"
+    # Языки программирования
+    for kw, ext in _CODE_EXTS.items():
+        if kw in tl:
+            return ext
+    # Слово "скрипт" без уточнения → Python
+    if "скрипт" in tl or "програм" in tl or "код" in tl:
+        return "py"
+    return "txt"
+
+
+def _make_filename(ext: str, hint: str = "") -> str:
+    """Генерирует осмысленное имя файла."""
+    hint = re.sub(r"[^\w\s-]", "", hint, flags=re.U).strip()
+    hint = re.sub(r"\s+", "_", hint)[:30].strip("_").lower()
+    base = hint if hint else {
+        "py": "script", "js": "script", "ts": "script",
+        "html": "index", "css": "styles", "json": "data",
+        "csv": "table", "md": "readme", "sql": "query",
+        "xlsx": "table", "docx": "document", "pptx": "presentation",
+        "sh": "script", "yaml": "config", "yml": "config",
+        "txt": "file",
+    }.get(ext, "file")
+    return f"{base}.{ext}"
+
+
+def _extract_code_from_answer(answer: str) -> tuple[str, str]:
+    """Извлекает код из markdown блоков. Возвращает (lang, code)."""
+    # Ищем ```lang\ncode\n```
+    m = re.search(r"```(\w*)\n([\s\S]+?)```", answer)
+    if m:
+        lang = m.group(1).lower().strip()
+        code = m.group(2)
+        return lang, code
+    # Если нет блоков — весь текст как код
+    return "", answer
+
+
+async def _build_office_file(ext: str, content_text: str, prompt: str) -> bytes | None:
+    """Создаёт Office-файл из текстового контента от AI."""
+    try:
+        if ext == "docx":
+            from docx import Document
+            from docx.shared import Pt, RGBColor
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+            doc = Document()
+            # Стили
+            style = doc.styles["Normal"]
+            style.font.name = "Calibri"
+            style.font.size = Pt(11)
+
+            lines = content_text.strip().split("\n")
+            for line in lines:
+                line = line.rstrip()
+                if not line:
+                    doc.add_paragraph()
+                    continue
+                # Заголовки по маркерам
+                if line.startswith("# "):
+                    p = doc.add_heading(line[2:], level=1)
+                elif line.startswith("## "):
+                    p = doc.add_heading(line[3:], level=2)
+                elif line.startswith("### "):
+                    p = doc.add_heading(line[4:], level=3)
+                elif line.startswith("- ") or line.startswith("* "):
+                    p = doc.add_paragraph(line[2:], style="List Bullet")
+                elif re.match(r"^\d+\.\s", line):
+                    p = doc.add_paragraph(re.sub(r"^\d+\.\s*", "", line), style="List Number")
+                elif line.startswith("**") and line.endswith("**"):
+                    p = doc.add_paragraph()
+                    run = p.add_run(line.strip("*"))
+                    run.bold = True
+                else:
+                    doc.add_paragraph(line)
+
+            buf = io.BytesIO()
+            doc.save(buf)
+            return buf.getvalue()
+
+        elif ext == "xlsx":
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+            from openpyxl.utils import get_column_letter
+            wb = openpyxl.Workbook()
+            ws = wb.active
+
+            header_fill = PatternFill("solid", fgColor="2F5496")
+            header_font = Font(bold=True, color="FFFFFF", size=11)
+            alt_fill    = PatternFill("solid", fgColor="DCE6F1")
+            thin = Side(style="thin", color="B8CCE4")
+            border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+            lines = [l for l in content_text.strip().split("\n") if l.strip()]
+            for row_idx, line in enumerate(lines, 1):
+                # Разделители: |, ;, \t
+                cells = re.split(r"[|;\t]", line)
+                cells = [c.strip() for c in cells]
+                for col_idx, val in enumerate(cells, 1):
+                    cell = ws.cell(row=row_idx, column=col_idx, value=val)
+                    cell.border = border
+                    cell.alignment = Alignment(wrap_text=True, vertical="center")
+                    if row_idx == 1:
+                        cell.font = header_font
+                        cell.fill = header_fill
+                    elif row_idx % 2 == 0:
+                        cell.fill = alt_fill
+
+                    # Авто-ширина
+                    col_letter = get_column_letter(col_idx)
+                    cur_width = ws.column_dimensions[col_letter].width or 8
+                    ws.column_dimensions[col_letter].width = min(max(cur_width, len(str(val)) + 4), 50)
+                ws.row_dimensions[row_idx].height = 18
+
+            buf = io.BytesIO()
+            wb.save(buf)
+            return buf.getvalue()
+
+        elif ext == "pptx":
+            from pptx import Presentation
+            from pptx.util import Inches, Pt, Emu
+            from pptx.dml.color import RGBColor as PptxRGB
+            prs = Presentation()
+            prs.slide_width  = Inches(13.33)
+            prs.slide_height = Inches(7.5)
+
+            # Тема: тёмно-синий
+            DARK  = PptxRGB(0x1F, 0x39, 0x64)
+            LIGHT = PptxRGB(0xED, 0xF2, 0xFF)
+            ACC   = PptxRGB(0x70, 0xAD, 0x47)
+
+            slides_raw = re.split(r"(?m)^---+\s*$|^#{1,2}\s+", content_text)
+            slides_raw = [s.strip() for s in slides_raw if s.strip()]
+
+            for i, slide_text in enumerate(slides_raw[:20]):
+                slide_lines = slide_text.strip().split("\n")
+                title_text  = slide_lines[0].lstrip("#").strip()
+                body_text   = "\n".join(slide_lines[1:]).strip()
+
+                layout = prs.slide_layouts[1] if body_text else prs.slide_layouts[0]
+                slide  = prs.slides.add_slide(layout)
+
+                # Фон
+                bg = slide.background
+                fill = bg.fill
+                fill.solid()
+                fill.fore_color.rgb = DARK if i == 0 else PptxRGB(0xFF, 0xFF, 0xFF)
+
+                # Заголовок
+                if slide.shapes.title:
+                    tf = slide.shapes.title.text_frame
+                    tf.text = title_text
+                    for para in tf.paragraphs:
+                        for run in para.runs:
+                            run.font.size  = Pt(36 if i == 0 else 28)
+                            run.font.bold  = True
+                            run.font.color.rgb = LIGHT if i == 0 else DARK
+
+                # Тело
+                if body_text and len(slide.placeholders) > 1:
+                    tf2 = slide.placeholders[1].text_frame
+                    tf2.word_wrap = True
+                    tf2.text = ""
+                    for line in body_text.split("\n"):
+                        line = line.lstrip("- *•").strip()
+                        if not line:
+                            continue
+                        p = tf2.add_paragraph()
+                        p.text = line
+                        p.level = 0
+                        for run in p.runs:
+                            run.font.size  = Pt(18)
+                            run.font.color.rgb = PptxRGB(0x26, 0x26, 0x26)
+
+            buf = io.BytesIO()
+            prs.save(buf)
+            return buf.getvalue()
+
+    except Exception as e:
+        log.error("_build_office_file ext=%s err=%s", ext, e)
+    return None
+
+
+async def generate_and_send_file(
+    msg: Message,
+    session: aiohttp.ClientSession,
+    user_prompt: str,
+    uid_str: str,
+) -> bool:
+    """Генерирует файл по запросу юзера и отправляет в чат.
+    Возвращает True если файл был отправлен."""
+    ext = _detect_file_ext(user_prompt)
+
+    # Системная инструкция для AI в зависимости от типа файла
+    office_exts = {"docx", "xlsx", "pptx"}
+    code_exts   = {"py", "js", "ts", "html", "css", "json", "csv", "yaml", "yml",
+                   "xml", "sql", "sh", "cpp", "c", "java", "kt", "rs", "go",
+                   "php", "rb", "swift", "md", "txt"}
+
+    if ext in office_exts:
+        if ext == "xlsx":
+            sys_hint = (
+                "Сгенерируй содержимое таблицы. "
+                "Первая строка — заголовки столбцов. "
+                "Разделяй столбцы символом |. "
+                "Без лишних пояснений, только строки таблицы."
+            )
+        elif ext == "docx":
+            sys_hint = (
+                "Напиши содержимое документа в формате Markdown. "
+                "Используй # для заголовков, ## для подзаголовков, "
+                "- для списков, **текст** для жирного. "
+                "Без лишних пояснений, только содержимое документа."
+            )
+        elif ext == "pptx":
+            sys_hint = (
+                "Напиши содержимое презентации. "
+                "Каждый слайд начинается с # Заголовок. "
+                "Под заголовком — пункты через -. "
+                "Слайды разделяй строкой ---. "
+                "Без лишних пояснений, только слайды."
+            )
+        ai_prompt = f"{sys_hint}\n\nЗадача: {user_prompt}"
+        raw_answer = await ai_chat(session, uid_str, ai_prompt)
+        if not raw_answer or raw_answer in _FALLBACKS:
+            return False
+
+        file_bytes = await _build_office_file(ext, raw_answer, user_prompt)
+        if not file_bytes:
+            return False
+
+        # Имя файла
+        clean_hint = re.sub(r"(?i)(создай|сделай|напиши|скинь|сгенерируй).{0,30}(excel|xlsx|word|docx|pptx|таблиц|документ|презентац)\s*", "", user_prompt).strip()
+        fname = _make_filename(ext, clean_hint)
+
+        caption = random.choice(["держи", "вот", "на", "готово"])
+        await msg.answer_document(BufferedInputFile(file_bytes, fname), caption=caption)
+        log.info("generate_and_send_file: %s sent size=%d", fname, len(file_bytes))
+        return True
+
+    elif ext in code_exts:
+        # Для кода — просим AI написать чистый код
+        lang_name = {
+            "py": "Python", "js": "JavaScript", "ts": "TypeScript",
+            "html": "HTML", "css": "CSS", "json": "JSON", "csv": "CSV",
+            "yaml": "YAML", "yml": "YAML", "xml": "XML", "sql": "SQL",
+            "sh": "Bash", "cpp": "C++", "c": "C", "java": "Java",
+            "kt": "Kotlin", "rs": "Rust", "go": "Go", "php": "PHP",
+            "rb": "Ruby", "swift": "Swift", "md": "Markdown", "txt": "текст",
+        }.get(ext, ext.upper())
+
+        ai_prompt = (
+            f"Напиши {lang_name} код для следующей задачи. "
+            f"Верни ТОЛЬКО код в блоке ```{ext}\n...\n```. "
+            f"Код должен быть рабочим, с комментариями на русском языке там где нужно. "
+            f"Без объяснений вне блока кода.\n\nЗадача: {user_prompt}"
+        )
+        raw_answer = await ai_chat(session, uid_str, ai_prompt)
+        if not raw_answer or raw_answer in _FALLBACKS:
+            return False
+
+        _, code = _extract_code_from_answer(raw_answer)
+        code = code.strip()
+        if not code:
+            return False
+
+        clean_hint = re.sub(r"(?i)(создай|сделай|напиши|скинь|сгенерируй).{0,30}(скрипт|файл|код|программ)\s*", "", user_prompt).strip()
+        fname = _make_filename(ext, clean_hint)
+
+        file_bytes = code.encode("utf-8")
+        caption = random.choice(["держи", "вот твой код", "на", "готово"])
+        await msg.answer_document(BufferedInputFile(file_bytes, fname), caption=caption)
+        log.info("generate_and_send_file: %s sent size=%d", fname, len(file_bytes))
+        return True
+
+    return False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2918,18 +3365,21 @@ async def on_video(msg: Message, aiohttp_session: aiohttp.ClientSession):
                     _auto_gender(u, text)
                     mem.reset_sticker_streak(u)
                     # Передаём с контекстом — мурка знает что это был кружок со звуком
+                    transcribed = text.strip()
                     if img_b64:
-                        # Есть превью кадра — используем vision чтобы видела и картинку и слышала
+                        # Есть превью кадра — используем vision
                         circle_prompt = (
-                            f"тебе прислали кружок-видео. ты посмотрела его и услышала что человек говорит: "
-                            f"«{text.strip()}». вот как он выглядел на видео — реагируй на всё вместе: "
-                            f"и на то что сказал, и на то что видно."
+                            f"человек прислал тебе кружок-видео. "
+                            f"в нём он говорит следующее (транскрипт): {transcribed}. "
+                            f"на скриншоте видно как он выглядит. "
+                            f"отреагируй живо в своём стиле — на то что он сказал и на то что видно."
                         )
                         answer = await ai_vision(aiohttp_session, u, circle_prompt, img_b64, "image/jpeg")
                     else:
                         circle_prompt = (
-                            f"тебе прислали кружок-видео. ты посмотрела и услышала: «{text.strip()}». "
-                            f"отреагируй в своём стиле — как будто только что посмотрела это видео."
+                            f"человек прислал тебе кружок-видео. "
+                            f"в нём он говорит: {transcribed}. "
+                            f"отреагируй в своём стиле на то что он сказал."
                         )
                         answer = await ai_chat(aiohttp_session, u, circle_prompt)
                     stop.set()
@@ -3189,6 +3639,321 @@ async def _web_search_ctx(session: aiohttp.ClientSession, query: str) -> str:
     return ""
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# FILE BUILDER — создаёт файлы из ответа AI
+# ══════════════════════════════════════════════════════════════════════════════
+_FILE_TAG_RE = re.compile(
+    r"^\[ФАЙЛ:([a-zA-Z0-9]+)\]\s*\n?(.+)$",
+    re.DOTALL | re.I
+)
+
+# Расширения которые отправляем как текст
+_CODE_EXTS = {
+    "py", "js", "ts", "html", "css", "json", "txt", "md",
+    "sql", "sh", "bash", "cpp", "c", "cs", "java", "go",
+    "rs", "php", "rb", "swift", "kt", "r", "yaml", "yml",
+    "toml", "ini", "cfg", "env", "xml", "csv",
+}
+
+_MIME_MAP = {
+    "py": "text/x-python", "js": "application/javascript",
+    "ts": "application/typescript", "html": "text/html",
+    "css": "text/css", "json": "application/json",
+    "txt": "text/plain", "md": "text/markdown",
+    "sql": "application/sql", "sh": "application/x-sh",
+    "cpp": "text/x-c++src", "cs": "text/x-csharp",
+    "java": "text/x-java", "csv": "text/csv",
+    "xml": "application/xml", "yaml": "text/yaml",
+    "yml": "text/yaml",
+}
+
+
+def _build_docx(content_text: str) -> bytes:
+    """Строит .docx из структурированного текста с маркерами."""
+    from docx import Document
+    from docx.shared import Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+
+    # Настройка стилей
+    style = doc.styles["Normal"]
+    style.font.name = "Calibri"
+    style.font.size = Pt(11)
+
+    current_table = None
+    current_table_cols = 0
+
+    for line in content_text.split("\n"):
+        line = line.strip()
+        if not line:
+            if current_table:
+                current_table = None
+            continue
+
+        if line.startswith("[ЗАГОЛОВОК]"):
+            current_table = None
+            text = line[len("[ЗАГОЛОВОК]"):].strip()
+            h = doc.add_heading(text, level=1)
+            h.runs[0].font.color.rgb = RGBColor(0x1F, 0x49, 0x7D)
+        elif line.startswith("[ПОДЗАГОЛОВОК]"):
+            current_table = None
+            text = line[len("[ПОДЗАГОЛОВОК]"):].strip()
+            h = doc.add_heading(text, level=2)
+        elif line.startswith("[ПАРАГРАФ]"):
+            current_table = None
+            text = line[len("[ПАРАГРАФ]"):].strip()
+            doc.add_paragraph(text)
+        elif line.startswith("[ТАБЛИЦА]"):
+            headers = [h.strip() for h in line[len("[ТАБЛИЦА]"):].split("|")]
+            current_table_cols = len(headers)
+            current_table = doc.add_table(rows=1, cols=current_table_cols)
+            current_table.style = "Table Grid"
+            hdr_cells = current_table.rows[0].cells
+            for i, h in enumerate(headers):
+                hdr_cells[i].text = h
+                hdr_cells[i].paragraphs[0].runs[0].bold = True
+        elif line.startswith("[СТРОКА]") and current_table:
+            vals = [v.strip() for v in line[len("[СТРОКА]"):].split("|")]
+            row_cells = current_table.add_row().cells
+            for i, v in enumerate(vals[:current_table_cols]):
+                row_cells[i].text = v
+        elif line.startswith("[ПУНКТ]"):
+            current_table = None
+            text = line[len("[ПУНКТ]"):].strip()
+            doc.add_paragraph(text, style="List Bullet")
+        else:
+            # Обычный текст без маркера
+            if line and not line.startswith("["):
+                doc.add_paragraph(line)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _build_xlsx(content_text: str) -> bytes:
+    """Строит .xlsx из структурированного текста."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Данные"
+
+    # Стили
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    header_fill = PatternFill("solid", fgColor="1F497D")
+    header_align = Alignment(horizontal="center", vertical="center")
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    row_num = 1
+    in_table = False
+    col_count = 0
+
+    for line in content_text.split("\n"):
+        line = line.strip()
+        if not line:
+            if in_table:
+                row_num += 1
+            in_table = False
+            continue
+
+        if line.startswith("[ЗАГОЛОВОК]"):
+            text = line[len("[ЗАГОЛОВОК]"):].strip()
+            ws.cell(row=row_num, column=1, value=text).font = Font(bold=True, size=14, color="1F497D")
+            row_num += 2
+            in_table = False
+        elif line.startswith("[ПОДЗАГОЛОВОК]"):
+            text = line[len("[ПОДЗАГОЛОВОК]"):].strip()
+            ws.cell(row=row_num, column=1, value=text).font = Font(bold=True, size=12)
+            row_num += 1
+            in_table = False
+        elif line.startswith("[ТАБЛИЦА]"):
+            headers = [h.strip() for h in line[len("[ТАБЛИЦА]"):].split("|")]
+            col_count = len(headers)
+            for i, h in enumerate(headers, 1):
+                cell = ws.cell(row=row_num, column=i, value=h)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_align
+                cell.border = border
+                ws.column_dimensions[chr(64 + i)].width = max(15, len(h) + 4)
+            row_num += 1
+            in_table = True
+        elif line.startswith("[СТРОКА]"):
+            vals = [v.strip() for v in line[len("[СТРОКА]"):].split("|")]
+            for i, v in enumerate(vals[:col_count], 1):
+                cell = ws.cell(row=row_num, column=i, value=v)
+                cell.border = border
+                # Чередование строк
+                if row_num % 2 == 0:
+                    cell.fill = PatternFill("solid", fgColor="F2F2F2")
+            row_num += 1
+            in_table = True
+        elif not line.startswith("["):
+            ws.cell(row=row_num, column=1, value=line)
+            row_num += 1
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _build_pptx(content_text: str) -> bytes:
+    """Строит .pptx из структурированного текста."""
+    from pptx import Presentation
+    from pptx.util import Inches, Pt
+    from pptx.dml.color import RGBColor
+    from pptx.enum.text import PP_ALIGN
+
+    prs = Presentation()
+    prs.slide_width = Inches(13.33)
+    prs.slide_height = Inches(7.5)
+
+    # Layouts
+    title_layout = prs.slide_layouts[0]   # Title Slide
+    content_layout = prs.slide_layouts[1]  # Title and Content
+    blank_layout = prs.slide_layouts[6]    # Blank
+
+    slide = None
+    tf = None
+    current_slide_title = ""
+
+    def _new_slide(title_text: str):
+        nonlocal slide, tf, current_slide_title
+        current_slide_title = title_text
+        s = prs.slides.add_slide(content_layout)
+        # Заголовок
+        s.shapes.title.text = title_text
+        s.shapes.title.text_frame.paragraphs[0].font.size = Pt(28)
+        s.shapes.title.text_frame.paragraphs[0].font.bold = True
+        s.shapes.title.text_frame.paragraphs[0].font.color.rgb = RGBColor(0x1F, 0x49, 0x7D)
+        # Контент placeholder
+        content_ph = s.placeholders[1]
+        content_ph.text = ""
+        slide = s
+        tf = content_ph.text_frame
+        tf.word_wrap = True
+
+    def _add_text(text: str, bold=False, size=18, level=0):
+        if tf is None:
+            return
+        p = tf.add_paragraph()
+        p.text = text
+        p.level = level
+        run = p.runs[0] if p.runs else p.add_run()
+        run.font.size = Pt(size)
+        run.font.bold = bold
+
+    # Первый слайд — обложка
+    lines = content_text.split("\n")
+    first_title = ""
+    for line in lines:
+        line = line.strip()
+        if line.startswith("[СЛАЙД]"):
+            first_title = line[len("[СЛАЙД]"):].strip()
+            break
+        elif line.startswith("[ЗАГОЛОВОК]"):
+            first_title = line[len("[ЗАГОЛОВОК]"):].strip()
+            break
+    if first_title:
+        cover = prs.slides.add_slide(title_layout)
+        cover.shapes.title.text = first_title
+        cover.shapes.title.text_frame.paragraphs[0].font.size = Pt(36)
+        cover.shapes.title.text_frame.paragraphs[0].font.bold = True
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("[СЛАЙД]"):
+            title_text = line[len("[СЛАЙД]"):].strip()
+            if title_text != first_title:
+                _new_slide(title_text)
+        elif line.startswith("[ТЕКСТ]"):
+            if slide is None:
+                _new_slide("Слайд")
+            text = line[len("[ТЕКСТ]"):].strip()
+            _add_text(text, size=18)
+        elif line.startswith("[ПУНКТ]"):
+            if slide is None:
+                _new_slide("Слайд")
+            text = line[len("[ПУНКТ]"):].strip()
+            _add_text("• " + text, size=16, level=1)
+        elif line.startswith("[ЗАГОЛОВОК]"):
+            # В контексте pptx — новый слайд
+            title_text = line[len("[ЗАГОЛОВОК]"):].strip()
+            if title_text != first_title:
+                _new_slide(title_text)
+        elif line.startswith("[ПОДЗАГОЛОВОК]"):
+            if slide is None:
+                _new_slide("Слайд")
+            text = line[len("[ПОДЗАГОЛОВОК]"):].strip()
+            _add_text(text, bold=True, size=20)
+
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+async def _ai_generate_file(session: aiohttp.ClientSession,
+                             uid_str: str, user_request: str,
+                             ext: str) -> tuple[bytes | None, str]:
+    """Просит AI сгенерировать содержимое файла, возвращает (bytes, filename)."""
+    # Спец-промпт для файла — просим AI выдать тег + контент
+    file_prompt = (
+        f"[СИСТЕМНОЕ: пользователь просит создать файл .{ext}]\n"
+        f"{user_request}\n\n"
+        f"Ответь ТОЛЬКО тегом [ФАЙЛ:{ext}] и сразу весь контент. "
+        f"Никаких объяснений до тега."
+    )
+    raw = await ai_chat(session, uid_str, file_prompt)
+    if not raw:
+        return None, ""
+
+    m = _FILE_TAG_RE.match(raw.strip())
+    if not m:
+        # AI не добавил тег — берём всё что он написал как контент
+        file_content = raw.strip()
+        detected_ext = ext
+    else:
+        detected_ext = m.group(1).lower()
+        file_content = m.group(2).strip()
+
+    # Очищаем markdown-блоки ``` если AI добавил их
+    file_content = re.sub(r"^```[\w]*\n?", "", file_content, flags=re.M)
+    file_content = re.sub(r"\n?```$", "", file_content, flags=re.M)
+    file_content = file_content.strip()
+
+    fname_base = re.sub(r"[^\w]", "_", user_request[:30]).strip("_") or "murka_file"
+
+    try:
+        if detected_ext == "docx":
+            data = _build_docx(file_content)
+            return data, f"{fname_base}.docx"
+        elif detected_ext == "xlsx":
+            data = _build_xlsx(file_content)
+            return data, f"{fname_base}.xlsx"
+        elif detected_ext == "pptx":
+            data = _build_pptx(file_content)
+            return data, f"{fname_base}.pptx"
+        elif detected_ext == "csv":
+            data = file_content.encode("utf-8-sig")  # BOM для Excel
+            return data, f"{fname_base}.csv"
+        elif detected_ext in _CODE_EXTS or detected_ext:
+            data = file_content.encode("utf-8")
+            return data, f"{fname_base}.{detected_ext}"
+        else:
+            data = file_content.encode("utf-8")
+            return data, f"{fname_base}.txt"
+    except Exception as e:
+        log.error("_ai_generate_file build fail ext=%s: %s", detected_ext, e)
+        # Fallback: вернуть как текст
+        return file_content.encode("utf-8"), f"{fname_base}.{detected_ext or "txt"}"
+
+
 async def search_and_send_pic(msg: Message, query: str,
                               session: aiohttp.ClientSession) -> bool:
     from urllib.parse import quote
@@ -3248,6 +4013,62 @@ async def search_and_send_pic(msg: Message, query: str,
 # TEXT HANDLER — главный
 # ИСПРАВЛЕНО: "нарисуй ..." обрабатывается здесь же, не в отдельном хендлере
 # ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════
+# FILE REQUEST DETECTOR
+# ══════════════════════════════════════════════════════
+_FILE_REQUEST_RE = re.compile(
+    r"(?i)("
+    r"скинь|кинь|дай|отправь|создай|сделай|напиши|сгенерируй|подготовь|сохрани"
+    r").{0,30}("
+    r"\.py|\.js|\.ts|\.html|\.css|\.json|\.txt|\.md|\.sql|\.sh|"
+    r"\.cpp|\.cs|\.java|\.go|\.rs|\.php|\.csv|\.xml|\.yaml|\.yml|"
+    r"\.docx|\.xlsx|\.pptx|\.xls|\.doc|\.ppt|"
+    r"питон.?файл|python.?файл|js.?файл|javascript.?файл|"
+    r"ворд.?документ|excel.?таблиц|powerpoint.?презентац|"
+    r"word.?документ|word.?файл|excel.?файл|pptx.?файл|"
+    r"файл.?с.?кодом|код.?файл|скрипт|исходник|"
+    r"презентаци[юя]|таблиц[уа].?excel|документ.?word"
+    r")"
+)
+
+_EXT_MAP = {
+    "py": "py", "питон": "py", "python": "py",
+    "js": "js", "javascript": "js",
+    "ts": "ts", "typescript": "ts",
+    "html": "html", "htm": "html",
+    "css": "css",
+    "json": "json",
+    "txt": "txt",
+    "md": "md", "markdown": "md",
+    "sql": "sql",
+    "sh": "sh", "bash": "sh",
+    "cpp": "cpp", "c++": "cpp",
+    "cs": "cs", "c#": "cs",
+    "java": "java",
+    "go": "go",
+    "rs": "rs", "rust": "rs",
+    "php": "php",
+    "csv": "csv",
+    "xml": "xml",
+    "yaml": "yaml", "yml": "yaml",
+    "docx": "docx", "doc": "docx", "ворд": "docx", "word": "docx",
+    "xlsx": "xlsx", "xls": "xlsx", "excel": "xlsx",
+    "pptx": "pptx", "ppt": "pptx", "powerpoint": "pptx",
+}
+
+
+def _detect_file_request(text: str) -> str | None:
+    if not _FILE_REQUEST_RE.search(text):
+        return None
+    tl = text.lower()
+    for key, ext in _EXT_MAP.items():
+        if key in tl:
+            return ext
+    if re.search(r"(?i)(код|скрипт|программ|исходник)", tl):
+        return "py"
+    return "txt"
+
+
 @dp.message(F.text)
 async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
     u    = uid(msg)
@@ -3271,6 +4092,33 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
                 await msg.answer(random.choice(["не смогла открыть видео", "ссылка не открывается"]))
             finally:
                 stop.set()
+            return
+
+        # ── Запрос на создание файла ──
+        file_ext = _detect_file_request(text)
+        if file_ext:
+            stop.set()
+            file_stop = asyncio.Event()
+            asyncio.create_task(_upload_photo_loop(msg.chat.id, file_stop))
+            try:
+                file_data, fname = await asyncio.wait_for(
+                    _ai_generate_file(aiohttp_session, u, text, file_ext),
+                    timeout=120,
+                )
+            except asyncio.TimeoutError:
+                file_data, fname = None, ""
+            finally:
+                file_stop.set()
+            if file_data and fname:
+                await msg.answer_document(
+                    BufferedInputFile(file_data, fname),
+                    caption=random.choice(["на держи", "вот файл", "готово", "держи 📎"]),
+                )
+            else:
+                await msg.answer(random.choice([
+                    "чот не вышло сгенерировать, попробуй ещё раз",
+                    "сломалась, попробуй снова",
+                ]))
             return
 
         # ИСПРАВЛЕНО: "нарисуй ..." — обрабатываем здесь, без отдельного хендлера
@@ -3334,6 +4182,25 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
                 "кидай аудио файл, не текст",
             ]))
             _music_waiting.add(u)
+            return
+
+        # Детект запроса на создание файла
+        if _detect_file_request(text):
+            stop.set()
+            file_stop = asyncio.Event()
+            asyncio.create_task(_upload_photo_loop(msg.chat.id, file_stop))
+            try:
+                sent = await generate_and_send_file(msg, aiohttp_session, text, u)
+            except Exception as e:
+                log.warning("generate_and_send_file fail: %s", e)
+                sent = False
+            finally:
+                file_stop.set()
+            if not sent:
+                # Если файл не получился — отвечаем текстом как обычно
+                answer = await ai_chat(aiohttp_session, u, text)
+                answer = await maybe_send_sticker(msg, answer)
+                await send_smart(msg, answer)
             return
 
         # Детект запроса медиа
