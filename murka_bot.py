@@ -132,12 +132,13 @@ class Secrets:
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
     # OR fallback список — пробуем по очереди
     OR_FALLBACK_MODELS: list[str] = [
-        "mistralai/mistral-7b-instruct:free",
-        "microsoft/phi-3-mini-128k-instruct:free",
-        "meta-llama/llama-3.2-3b-instruct:free",
-        "google/gemma-3-4b-it:free",
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "mistralai/mistral-small-3.1-24b-instruct:free",
+        "deepseek/deepseek-r1:free",
+        "google/gemma-3-27b-it:free",
+        "meta-llama/llama-3.1-8b-instruct:free",
     ]
-    MODEL_FALLBACK_OR: str = "mistralai/mistral-7b-instruct:free"
+    MODEL_FALLBACK_OR: str = "meta-llama/llama-3.3-70b-instruct:free"
     # HF Space для RVC
     HF_SPACE_BASE: str = os.environ.get(
         "HF_SPACE_URL", "https://wqyuetasdasd-murka-rvc-inference.hf.space"
@@ -213,7 +214,6 @@ class KeyManager:
         until_wall = time.time() + duration
         try:
             with sqlite3.connect(self._BAN_DB) as c:
-                # Не перезаписываем бан если существующий заканчивается позже
                 existing = c.execute(
                     "SELECT until_ts FROM bans WHERE idx=?", (idx,)
                 ).fetchone()
@@ -248,7 +248,6 @@ class KeyManager:
             cd = float(self.COOLDOWN_RPM)
             log.info("Ключ #%d → RPM 429-бан на 65с", idx)
         new_cd_end = time.monotonic() + cd
-        # Не сокращаем существующий бан если он уже длиннее
         if self._cooldown.get(idx, 0) >= new_cd_end:
             log.info("Ключ #%d уже в более длинном бане, пропускаем", idx)
             return
@@ -1802,7 +1801,7 @@ async def maybe_send_sticker(msg: Message, answer: str,
     # Вычисляем текст без тега ДО отправки стикера
     answer_without_tag = re.sub(r"\[(СТИКЕР|ГИФКА):\s*[^\]]+\]", "", answer, flags=re.I).strip()
 
-    # Стоп-слова: если после удаления тега остаётся только связка типа "на"/"вот" — не шлём стикер
+    # Если после удаления тега остаётся только заглушка типа "на"/"вот" — не шлём стикер
     _STICKER_STUB_WORDS = {"на", "вот", "держи", "лови", "смотри", "гляди", "ну", "да", "хм"}
     remaining_words = set(answer_without_tag.lower().split())
     text_is_stub = len(answer_without_tag) < 10 and remaining_words.issubset(_STICKER_STUB_WORDS)
@@ -2198,8 +2197,59 @@ async def cmd_keystatus(msg: Message):
     else:
         or_left = max(0, _OR_DAILY_LIMIT - _or_daily_count)
         lines.append(f"{'✅' if or_left > 50 else '⚠️'} OR fallback: {_or_daily_count}/{_OR_DAILY_LIMIT} ({or_left} осталось)")
-        lines.append(f"🦙 OR модели: {', '.join(Secrets.OR_FALLBACK_MODELS[:2])}")
+        or_banned = [m for m in Secrets.OR_FALLBACK_MODELS if _or_is_model_banned(m)]
+        or_ok     = [m.split("/")[-1].replace(":free","") for m in Secrets.OR_FALLBACK_MODELS if not _or_is_model_banned(m)]
+        lines.append(f"🦙 OR модели живые: {', '.join(or_ok) or 'все забанены!'}")
+        if or_banned:
+            lines.append(f"💀 OR забанены: {', '.join(m.split('/')[-1] for m in or_banned)}")
     lines.append(f"🤖 HF Space: {'✅ живой' if _hf_space_alive else ('❌ недоступен' if _hf_space_alive is False else '❓ не проверяли')}")
+    await msg.answer("\n".join(lines))
+
+
+@dp.message(Command("resetbans"))
+async def cmd_resetbans(msg: Message):
+    """Сбрасывает все баны Gemini-ключей и OR-моделей. Используй если баны были ошибочными."""
+    # Считаем сколько было
+    now_m = time.monotonic()
+    n = len(_keys._pool)
+    was_banned = sum(1 for i in range(n) if _keys._cooldown.get(i, 0) > now_m)
+
+    # Сброс in-memory кулдаунов
+    _keys._cooldown.clear()
+    _keys._err_count.clear()
+    # Сброс индексов чтобы с нуля начать обход
+    for k in list(_keys._type_idx.keys()):
+        _keys._type_idx[k] = 0
+
+    # Сброс БД банов
+    try:
+        with sqlite3.connect(_keys._BAN_DB) as c:
+            deleted = c.execute("DELETE FROM bans").rowcount
+            c.execute("VACUUM")
+        db_msg = f"БД: удалено {deleted} записей"
+    except Exception as e:
+        db_msg = f"БД: ошибка ({e})"
+
+    # Сброс OR-моделей
+    or_was = len([m for m in _or_model_banned if _or_is_model_banned(m)])
+    _or_model_banned.clear()
+
+    # Сброс OR дневного счётчика
+    global _or_daily_count, _or_daily_reset
+    _or_daily_count = 0
+    _or_daily_reset = time.time()
+
+    lines = [
+        "🔓 Баны сброшены!",
+        f"✅ Gemini: разбанено {was_banned} из {n} ключей ({db_msg})",
+        f"✅ OR модели: разбанено {or_was} моделей",
+        f"✅ OR счётчик запросов сброшен",
+        f"",
+        f"Теперь все {n} ключей снова активны.",
+        f"Используй /keystatus чтобы проверить.",
+    ]
+    log.warning("RESETBANS: выполнен пользователем %s — разбанено %d Gemini ключей, %d OR моделей",
+                msg.from_user.id if msg.from_user else "?", was_banned, or_was)
     await msg.answer("\n".join(lines))
 
 
@@ -3354,6 +3404,7 @@ async def main():
         BotCommand(command="cancel",    description="отменить текущую команду"),
         BotCommand(command="help",      description="помощь"),
         BotCommand(command="keystatus", description="статус ключей и серверов"),
+        BotCommand(command="resetbans", description="сбросить все баны ключей"),
         BotCommand(command="checkrvc",  description="проверить голосовой сервер"),
     ], scope=BotCommandScopeDefault())
 
