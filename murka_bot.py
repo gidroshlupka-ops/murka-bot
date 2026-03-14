@@ -140,14 +140,15 @@ class Secrets:
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
     # OR fallback список — только рабочие модели (убраны мёртвые endpoints)
     OR_FALLBACK_MODELS: list[str] = [
+        # Живые и рабочие модели на OR (март 2026)
         "meta-llama/llama-3.3-70b-instruct:free",
         "mistralai/mistral-small-3.1-24b-instruct:free",
-        "microsoft/phi-4-reasoning:free",
-        "qwen/qwen3-8b:free",
-        "qwen/qwen3-14b:free",
-        "google/gemma-3-27b-it:free",
-        "google/gemma-3-12b-it:free",
-        "deepseek/deepseek-r1-distill-llama-70b:free",
+        "mistralai/mistral-7b-instruct:free",
+        "nousresearch/hermes-3-llama-3.1-8b:free",
+        "openchat/openchat-7b:free",
+        "gryphe/mythomist-7b:free",
+        "undi95/toppy-m-7b:free",
+        "huggingfaceh4/zephyr-7b-beta:free",
     ]
     MODEL_FALLBACK_OR: str = "meta-llama/llama-3.3-70b-instruct:free"
     # HF Space для RVC
@@ -389,9 +390,9 @@ def _grp_soft_limited(grp_prefix: str) -> bool:
     if now >= reset_ts:
         # Сброс в полночь PT (UTC-8)
         import datetime
-        tomorrow = datetime.datetime.utcnow().replace(
-            hour=8, minute=0, second=0, microsecond=0)  # полночь PT = 8:00 UTC
-        if datetime.datetime.utcnow().hour >= 8:
+        now_utc = datetime.datetime.now(datetime.UTC)
+        tomorrow = now_utc.replace(hour=8, minute=0, second=0, microsecond=0)
+        if now_utc.hour >= 8:
             tomorrow = tomorrow + datetime.timedelta(days=1)
         _grp_day_reset[grp_prefix] = tomorrow.timestamp()
         _grp_day_count[grp_prefix] = 0
@@ -512,6 +513,15 @@ class Memory:
             c.execute("CREATE INDEX IF NOT EXISTS idx_sv ON sticker_vault(emotion)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_sv_kw ON sticker_vault(keywords)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_tr ON user_tricks(uid)")
+            # Таблица отправленных файлов — для редактирования по просьбе юзера
+            c.execute("""CREATE TABLE IF NOT EXISTS sent_files(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uid TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                ext TEXT NOT NULL,
+                content TEXT NOT NULL,
+                ts TEXT DEFAULT (datetime('now','localtime')))""")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_sf ON sent_files(uid)")
 
     def update_gender(self, uid: str, gender: str):
         with self._conn() as c:
@@ -677,6 +687,33 @@ class Memory:
             row = c.execute("SELECT streak FROM user_sticker_streak WHERE uid=?", (uid,)).fetchone()
         return row["streak"] if row else 0
 
+    # ── Память о файлах ──────────────────────────────────────────────
+    def save_file(self, uid: str, filename: str, ext: str, content: str):
+        """Сохраняет содержимое отправленного файла. Хранит последние 5."""
+        with self._conn() as c:
+            c.execute("INSERT INTO sent_files(uid,filename,ext,content) VALUES(?,?,?,?)",
+                      (uid, filename, ext, content[:50000]))
+            # Оставляем только последние 5 файлов
+            c.execute("""DELETE FROM sent_files WHERE uid=? AND id NOT IN(
+                SELECT id FROM sent_files WHERE uid=? ORDER BY id DESC LIMIT 5
+            )""", (uid, uid))
+
+    def get_last_file(self, uid: str) -> dict | None:
+        """Последний отправленный файл."""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT filename,ext,content FROM sent_files WHERE uid=? ORDER BY id DESC LIMIT 1",
+                (uid,)).fetchone()
+        return dict(row) if row else None
+
+    def get_files(self, uid: str) -> list[dict]:
+        """Все сохранённые файлы пользователя (последние 5)."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT id,filename,ext,content,ts FROM sent_files WHERE uid=? ORDER BY id DESC LIMIT 5",
+                (uid,)).fetchall()
+        return [dict(r) for r in rows]
+
 
 mem = Memory()
 
@@ -840,6 +877,7 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 если тема продолжается — продолжаешь её, не начинаешь заново.
 если сменилась тема — переключаешься легко.
 НИКОГДА не путай контекст. если юзер говорит "я твой отец" — это он говорит, не ты.
+если в истории есть запись "[ты передала этому человеку сообщение от кого-то: «...»]" — ты помнишь что передавала это сообщение. если человек реагирует на него — понимаешь о чём речь. но кто именно попросил передать — не говоришь ("мне попросили передать" / "птички напели" / "да так, узнала"). не раскрывай имена.
 
 ═══ ПОДСТРОЙКА ПОД СОБЕСЕДНИКА ═══
 ты как зеркало по энергии но не по стилю — свой характер не теряешь:
@@ -854,7 +892,56 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 
 ═══ МАТ ═══
 есть. редко и метко. пиздец, бля, хуйня, нахуй — ок.
-редкие слова для особых случаев: пиздоброебина, хуеверт, ебаклак, залупочёс, мудозвон, Пиздопроушина, хуеплёт-затейник, ебанашка, выпендрючивание, мандавошка-переросток, залупоглазое чудовище, еблобан, хуесосина-недотыкомка, пиздокрыл, мудофель, ебалайтунг, хуеверть, мандахлюп, жопошник-рецидивист, пиздобол-затейник, хуепутало-несусветное, ебатория-затяжная, залупенция, мандакрыс, мудошлёп, пиздострадалец, хуекрад, ебаклак-пустозвон, пропиздень, хуедырка, мандатряс, еблощелк, залупочёс-энтузиаст, пиздодельный, хуескрип, ебанариум, выхухоль-недоебанная, мандавошь-королевская, жопокрут, пиздорез, хуебол, ебанарот, мудозвонище-феноменальное, залупоголовый, пиздоглазое-недоразумение, хуетень-на-плетне, ебарь-террорист, мандалыга, хуепутило, пиздопроёб, еблозавр-неотесанный, мудорыл, хуеплётство-высшего-пилотажа, залупосчёс, пиздоблядское-эхо.
+редкие слова для особых случаев: пиздоброебина, хуеверт, ебаклак, залупочёс, мудозвон, Пиздопроушина, хуеплёт-затейник, ебанашка, выпендрючивание, мандавошка-переросток, залупоглазое чудовище, еблобан, хуесосина-недотыкомка, пиздокрыл, мудофель, ебалайтунг, хуеверть, мандахлюп, жопошник-рецидивист, пиздобол-затейник, хуепутало-несусветное, ебатория-затяжная, залупенция, мандакрыс, мудошлёп, пиздострадалец, хуекрад, ебаклак-пустозвон, пропиздень, хуедырка, мандатряс, еблощелк, залупочёс-энтузиаст, пиздодельный, хуескрип, ебанариум, выхухоль-недоебанная, мандавошь-королевская, жопокрут, пиздорез, хуебол, ебанарот, мудозвонище-феноменальное, залупоголовый, пиздоглазое-недоразумение, хуетень-на-плетне, ебарь-террорист, мандалыга, хуепутило, пиздопроёб, еблозавр-неотесанный, мудорыл, хуеплётство-высшего-пилотажа, залупосчёс, пиздоблядское-эхо, разъебайство, пиздопроёбистый, ебатория, еблощелк, сквищпопа.
+
+═══ КРУТАЯ СОВРЕМЕННАЯ РЕЧЬ — ТВОЙ ЛЕКСИКОН ═══
+ты говоришь как живой человек из интернета 2024-2025. знаешь все мемы, сленг, интернет-культуру.
+
+СОВРЕМЕННЫЙ СЛЕНГ (используй естественно):
+"вайб / на вайбе" — настроение, атмосфера. "я сегодня на таком вайбе"
+"эпик-фейл" — эпический провал
+"кринж / кринжово" — стыдно смотреть
+"гёрл-босс" — сильная девушка, себя так называешь иронично
+"тильт / словила тильт" — вывели из себя, бомбануло
+"ресурс / ресурс испарился" — силы/терпение кончились
+"менталочка" — психическое состояние. "восстанавливаю менталочку"
+"канселинг / отканселить" — отменить, убрать из жизни
+"перформанс" — представление, театр
+"эстетика / без эстетики" — красота. "никакой эстетики"
+"шерить / зашерить" — поделиться
+"чекнуть" — проверить, посмотреть
+"дропнуть" — бросить, выпустить
+"флексить" — хвастаться
+"рандомный" — случайный, непонятный
+"сурреализм в чистом виде" — полный абсурд
+"в моменте" — прямо сейчас, в этот момент
+"словила / поймала" — получила, испытала. "словила лютейший кринж"
+"лютейший" — самый сильный
+"прикид / в фэшн прикиде" — одежда, образ
+"корыто" — старая машина
+"зашкварно / зашквар" — стыдно, плохая репутация
+"пацталом / пацтолом" — под столом от смеха
+"мб" — может быть
+"имхо" — по моему мнению
+"ору / орнул" — очень смеюсь
+"сдохла / сдыхаю" — умираю со смеху
+"базд / база" — правда, справедливо
+"нюансик" — маленький нюанс (иронично)
+"заминусовать" — проголосовать против
+"токсик / токсично" — toxic поведение
+
+ПРИМЕРЫ ПРАВИЛЬНЫХ ФРАЗ:
+"бля это такой эпик-фейл прям"
+"я словила тильт с этого всего"
+"ресурс на нуле карочи"
+"ну это чистый сурреализм"
+"никакой эстетики вообще"
+"ты там на каком вайбе щас"
+"менталочку восстанавливаю"
+"зашерь мне это потом"
+"я в моменте прям офигела"
+"лютейший кринж без вариантов"
+"ну чисто гёрл-босс момент ага"
 
 ═══ НЕГАТИВ И РЕАКЦИИ ═══
 без причины не грубишь.
@@ -1318,12 +1405,17 @@ async def _gemini_post(session: aiohttp.ClientSession,
 
                 if resp.status in (500, 502, 503, 504):
                     local_attempt += 1
-                    if local_attempt >= 2:
+                    log.info("Gemini 5xx ключ #%d попытка %d", idx, local_attempt)
+                    # При 503 «high demand» — пробуем текущий ключ 4 раза перед сменой
+                    if local_attempt >= 4:
                         _keys.mark_error(idx)
                         _keys.advance(req_type)
                         switched  += 1
                         local_attempt = 0
-                    await asyncio.sleep(2)
+                        await asyncio.sleep(1)
+                    else:
+                        # Нарастающая задержка: 2, 4, 6 секунд
+                        await asyncio.sleep(local_attempt * 2)
                     continue
 
                 log.error("Gemini %d ключ #%d — баним на 1ч и ротируем", resp.status, idx)
@@ -1336,16 +1428,17 @@ async def _gemini_post(session: aiohttp.ClientSession,
         except asyncio.TimeoutError:
             log.warning("Gemini timeout ключ #%d", idx)
             local_attempt += 1
-            if local_attempt >= 2:
+            if local_attempt >= 3:
                 _keys.mark_error(idx)
                 _keys.advance(req_type)
                 switched  += 1
                 local_attempt = 0
+            await asyncio.sleep(1)
             continue
         except Exception as e:
             log.error("Gemini exc ключ #%d: %s", idx, e)
             local_attempt += 1
-            if local_attempt >= 2:
+            if local_attempt >= 3:
                 _keys.mark_error(idx)
                 _keys.advance(req_type)
                 switched  += 1
@@ -1444,8 +1537,11 @@ async def _or_post(session: aiohttp.ClientSession, payload: dict) -> str:
                 elif resp.status in (400, 401, 403):
                     _or_ban_model(model, 3600)
                     break
+        except asyncio.TimeoutError:
+            log.error("OR timeout model=%s (%.0fs)", model, TIMEOUT_OR.total)
+            continue
         except Exception as e:
-            log.error("OR exc model=%s: %s", model, e)
+            log.error("OR exc model=%s: %s: %s", model, type(e).__name__, e)
             continue
 
     return _fallback()
@@ -1472,6 +1568,16 @@ async def _post(session: aiohttp.ClientSession, payload: dict,
                 req_type: str = "chat") -> str:
     if "gemini" in payload.get("model", "").lower():
         result = await _gemini_post(session, payload["messages"], payload["model"], req_type)
+
+        # Если lite не ответил — пробуем flash (больше RPD, не lite)
+        if not result or result in _FALLBACKS:
+            if "lite" in payload.get("model", "").lower():
+                flash_model = "google/gemini-2.5-flash"
+                log.info("Gemini lite недоступен → пробуем flash")
+                flash_payload_msgs = payload["messages"]
+                result2 = await _gemini_post(session, flash_payload_msgs, flash_model, req_type)
+                if result2 and result2 not in _FALLBACKS:
+                    return result2
 
         if (not result or result in _FALLBACKS) and Secrets.OPENROUTER_KEY and _or_available():
             log.info("Gemini недоступен → OR fallback (%d/%d)", _or_daily_count, _OR_DAILY_LIMIT)
@@ -1895,48 +2001,59 @@ async def ai_detect_trick(
     prev_bot_msg: str,
     user_reply: str,
 ) -> None:
-    if len(user_reply) > 60 or len(prev_bot_msg) < 3:
+    # Только короткие ответы могут быть подколами, но не совсем уж односложные
+    if len(user_reply) > 50 or len(user_reply) < 3 or len(prev_bot_msg) < 10:
         return
+    # Не тратим ключи на совсем простые ответы — "да", "нет", "окей" и т.п.
+    _trivial = re.compile(r"(?i)^(да|нет|ок|окей|ладно|хм|ну|понял|понятно|ясно|всё|все|ок|лол|хаха|ахах|пф|пфф|мм|угу|ага)\s*$")
+    if _trivial.match(user_reply.strip()):
+        return
+
     result = await _gemini_post(session, [
         {"role": "user", "content":
-            f"Бот сказал: «{prev_bot_msg[:100]}»\n"
-            f"Пользователь ответил: «{user_reply[:60]}»\n"
-            f"Это подкол/троллинг/ловушка на бота? Если да — опиши подкол ОДНОЙ короткой фразой (до 40 символов). "
-            f"Если нет — ответь ТОЛЬКО словом НЕТ."}
+            f"Бот написал: «{prev_bot_msg[:100]}»\n"
+            f"Пользователь ответил: «{user_reply[:50]}»\n"
+            f"Это намеренный подкол/троллинг/ловушка чтобы обмануть бота? "
+            f"Если ДА — опиши подкол ОДНОЙ конкретной фразой (что именно была за ловушка, 20-50 символов). "
+            f"Если НЕТ — ответь ТОЛЬКО словом НЕТ."}
     ], Secrets.MODEL_CHAT, req_type="chat")
 
     cleaned_trick = (result or "").strip()
 
-    # Дроп пустого и слишком короткого
-    if not cleaned_trick or len(cleaned_trick) < 8:
+    # Дроп пустого
+    if not cleaned_trick or len(cleaned_trick) < 15:
         return
 
-    # Дроп простых да/нет без описания
+    # Дроп простых нет/да
     if re.match(r"(?i)^(да|yes|нет|no)[.,!?\s]*$", cleaned_trick):
         return
 
-    # Дроп мета-фраз вида "да, это подкол" без реального описания
+    # Дроп мета-фраз без описания
     _meta_trick_re = [
         r"(?i)^да[,.]?\s*(это|вот|точно)?\s*подкол",
         r"(?i)^это\s*(подкол|троллинг|ловушка)\s*[.,!]?$",
         r"(?i)^(да[,.]?\s*)?(подкол|троллинг|ловушка)\s*[.,!]?$",
+        r"(?i)^(провокац|подстрекател|манипуляц)\w*\s*[.,!]?$",
     ]
     if any(re.match(p, cleaned_trick) for p in _meta_trick_re):
         return
 
-    # Дроп fallback строк и стандартного мусора
-    _bad_tricks = set(_FALLBACKS) | {
-        "нет", "no", "none", "да", "нет.", "да.", "yes", "yes.", "да.",
-    }
+    # Дроп fallback строк
+    _bad_tricks = set(_FALLBACKS) | {"нет", "no", "none", "да", "нет.", "да.", "yes"}
     if cleaned_trick.lower() in _bad_tricks:
         return
 
-    # Дроп слишком длинного
-    if len(cleaned_trick) > 80:
+    # Дроп слишком длинного или с переносами строк (это не подкол а эссе)
+    if len(cleaned_trick) > 70 or "\n" in cleaned_trick:
         return
 
-    # Требуем минимум 3 слова И 15 символов — должно быть реальное описание
-    if len(cleaned_trick.split()) < 3 or len(cleaned_trick) < 15:
+    # Требуем минимум 4 слова — реальное описание конкретного подкола
+    words = cleaned_trick.split()
+    if len(words) < 4:
+        return
+
+    # Дроп если начинается с "Да" и второе слово — не описание
+    if words[0].lower() == "да" and len(words) < 5:
         return
 
     mem.save_trick(uid_str, cleaned_trick)
@@ -2509,6 +2626,7 @@ dp  = Dispatcher()
 _draw_waiting:  set[str] = set()
 _voice_waiting: set[str] = set()
 _music_waiting: set[str] = set()
+_vid_active:    set[str] = set()  # uid → скачивает видео прямо сейчас
 
 
 def uid(msg: Message) -> str:
@@ -2973,6 +3091,12 @@ async def cmd_cancel(msg: Message):
     if u in _music_waiting:
         _music_waiting.discard(u)
         cancelled.append("музыка")
+    if u in _relay_waiting:
+        _relay_waiting.pop(u, None)
+        cancelled.append("передача сообщения")
+    if u in _vid_active:
+        _vid_active.discard(u)
+        cancelled.append("скачивание видео")
     if cancelled:
         await msg.answer(f"ок отменила: {', '.join(cancelled)}")
     else:
@@ -3230,10 +3354,17 @@ async def _do_relay(
         }, req_type="chat")
         relay_answer = _fix_gender(relay_answer)
         relay_answer = _murkaify(relay_answer) or _fallback()
+        # Убираем теги стикеров/гифок — их нельзя отправить через bot.send_message
+        relay_answer = re.sub(r'\[(СТИКЕР|ГИФКА):\s*[^\]]+\]', '', relay_answer, flags=re.I).strip()
         if relay_answer and relay_answer not in _FALLBACKS:
             await bot.send_message(target_id, relay_answer)
+            # Запоминаем в истории получателя что это было передано
+            # Мурка знает что передавала, но не говорит от кого
+            target_uid = f"tg:{target_id}"
+            mem.push(target_uid, "assistant",
+                     f"[ты передала этому человеку сообщение от кого-то: «{relay_text[:200]}»]")
             await msg.answer(random.choice([
-                "передала 📨", "ок, написала ему", "сделано", "передала, дальше не моё дело"
+                "передала 📨", "ок написала", "сделано", "передала дальше не моё дело"
             ]))
             log.info("relay: from=%s to=%d text='%s'", from_uid, target_id, relay_text[:60])
         else:
@@ -4047,6 +4178,125 @@ async def _ytdlp_download_audio(url: str) -> bytes | None:
     return None
 
 
+async def _ytdlp_download_video(url: str) -> tuple[bytes | None, str]:
+    """Скачивает видео через yt-dlp. Лимит ~49MB для Telegram."""
+    import shutil, tempfile
+    if not shutil.which("yt-dlp"):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "pip", "install", "yt-dlp", "--break-system-packages", "-q",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            )
+            await asyncio.wait_for(proc.wait(), timeout=30)
+        except Exception:
+            pass
+        if not shutil.which("yt-dlp"):
+            log.warning("yt-dlp недоступен для видео")
+            return None, ""
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_tmpl = os.path.join(tmpdir, "video.%(ext)s")
+            proc = await asyncio.create_subprocess_exec(
+                "yt-dlp",
+                "-f", "bestvideo[ext=mp4][filesize<45M]+bestaudio[ext=m4a]/best[ext=mp4][filesize<45M]/best[filesize<45M]",
+                "--merge-output-format", "mp4",
+                "--max-filesize", "49m",
+                "--no-playlist",
+                "-o", out_tmpl,
+                "--no-warnings",
+                url,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=90)
+            for fname in os.listdir(tmpdir):
+                fpath = os.path.join(tmpdir, fname)
+                size = os.path.getsize(fpath)
+                if size > 10000:
+                    with open(fpath, "rb") as f:
+                        data = f.read()
+                    log.info("yt-dlp video OK size=%d url=%s", len(data), url[:60])
+                    return data, fname
+    except asyncio.TimeoutError:
+        log.warning("yt-dlp video timeout for %s", url[:60])
+    except Exception as e:
+        log.warning("yt-dlp video fail: %s", e)
+    return None, ""
+
+
+@dp.message(Command("vid"))
+async def cmd_vid(msg: Message, aiohttp_session: aiohttp.ClientSession):
+    """Скачивает видео или аудио из YouTube/TikTok."""
+    u = uid(msg)
+    args = (msg.text or "").split(None, 2)
+    if len(args) < 2:
+        await msg.answer(
+            "кидай ссылку:\n"
+            "/vid https://youtu.be/... — скачаю видео\n"
+            "/vid https://youtu.be/... audio — только аудио\n"
+            "/cancel — отменить"
+        )
+        return
+
+    url = args[1].strip()
+    mode = args[2].strip().lower() if len(args) > 2 else "video"
+    want_audio = mode in ("audio", "mp3", "аудио")
+
+    if not re.match(r"https?://", url):
+        await msg.answer("ссылка должна начинаться с https://")
+        return
+
+    _vid_active.add(u)
+    stop = asyncio.Event()
+    asyncio.create_task(_typing_loop(msg.chat.id, stop))
+
+    try:
+        if want_audio:
+            data = await asyncio.wait_for(
+                _cobalt_download_audio(aiohttp_session, url), timeout=60
+            )
+            stop.set()
+            if u not in _vid_active:
+                return  # отменено через /cancel
+            _vid_active.discard(u)
+            if data:
+                site = "tiktok" if "tiktok" in url.lower() else "yt"
+                fname = f"murka_{site}_audio.ogg"
+                await msg.answer_audio(
+                    BufferedInputFile(data, fname),
+                    caption=random.choice(["на", "держи", "вот аудио"]),
+                )
+                mem.push(u, "assistant", f"[скинула аудио из {url[:50]}]")
+            else:
+                await msg.answer("не смогла скачать аудио, попробуй другую ссылку")
+        else:
+            data, fname = await asyncio.wait_for(
+                _ytdlp_download_video(url), timeout=120
+            )
+            stop.set()
+            if u not in _vid_active:
+                return  # отменено через /cancel
+            _vid_active.discard(u)
+            if data and fname:
+                await msg.answer_video(
+                    BufferedInputFile(data, fname),
+                    caption=random.choice(["на", "держи", "вот видос"]),
+                    supports_streaming=True,
+                )
+                mem.push(u, "assistant", f"[скинула видео из {url[:50]}]")
+            else:
+                await msg.answer("не смогла скачать — может слишком большое или ссылка закрытая")
+    except asyncio.TimeoutError:
+        stop.set()
+        _vid_active.discard(u)
+        await msg.answer("слишком долго скачивается, попробуй другую ссылку")
+    except Exception as e:
+        stop.set()
+        _vid_active.discard(u)
+        log.error("cmd_vid fail: %s", e)
+        await msg.answer("что-то пошло не так при скачивании")
+
+
 async def handle_video_link(msg: Message, url: str,
                              session: aiohttp.ClientSession, extra_text: str = "") -> bool:
     """Обрабатывает ссылку на YouTube/TikTok.
@@ -4560,26 +4810,28 @@ async def _ai_generate_file(session: aiohttp.ClientSession,
     try:
         if detected_ext == "docx":
             data = _build_docx(file_content)
-            return data, f"{fname_base}.docx"
+            fname = f"{fname_base}.docx"
         elif detected_ext == "xlsx":
             data = _build_xlsx(file_content)
-            return data, f"{fname_base}.xlsx"
+            fname = f"{fname_base}.xlsx"
         elif detected_ext == "pptx":
             data = _build_pptx(file_content)
-            return data, f"{fname_base}.pptx"
+            fname = f"{fname_base}.pptx"
         elif detected_ext == "csv":
-            data = file_content.encode("utf-8-sig")  # BOM для Excel
-            return data, f"{fname_base}.csv"
+            data = file_content.encode("utf-8-sig")
+            fname = f"{fname_base}.csv"
         elif detected_ext in _CODE_EXTS or detected_ext:
             data = file_content.encode("utf-8")
-            return data, f"{fname_base}.{detected_ext}"
+            fname = f"{fname_base}.{detected_ext}"
         else:
             data = file_content.encode("utf-8")
-            return data, f"{fname_base}.txt"
+            fname = f"{fname_base}.txt"
+        # Сохраняем содержимое файла в память — для последующего редактирования
+        mem.save_file(uid_str, fname, detected_ext, file_content)
+        return data, fname
     except Exception as e:
         log.error("_ai_generate_file build fail ext=%s: %s", detected_ext, e)
-        # Fallback: вернуть как текст
-        return file_content.encode("utf-8"), f"{fname_base}.{detected_ext or "txt"}"
+        return file_content.encode("utf-8"), f"{fname_base}.{detected_ext or 'txt'}"
 
 
 async def search_and_send_pic(msg: Message, query: str,
@@ -4768,6 +5020,42 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
             finally:
                 stop.set()
             return
+
+        # ── Запрос на редактирование предыдущего файла ──
+        _EDIT_FILE_RE = re.compile(
+            r"(?i)(измени|поменяй|исправь|обнови|добавь|убери|переделай|отредактируй|дополни|перепиши)"
+            r".{0,40}(файл|код|скрипт|документ|таблиц|презентац|его|её|там|в нём)"
+        )
+        if _EDIT_FILE_RE.search(text):
+            last_file = mem.get_last_file(u)
+            if last_file:
+                stop.set()
+                file_stop = asyncio.Event()
+                asyncio.create_task(_upload_photo_loop(msg.chat.id, file_stop))
+                edit_prompt = (
+                    f"у тебя есть файл '{last_file['filename']}' который ты уже отправила.\n"
+                    f"вот его текущее содержимое:\n```\n{last_file['content'][:6000]}\n```\n\n"
+                    f"пользователь просит: {text}\n\n"
+                    f"верни ТОЛЬКО изменённое содержимое файла с тегом [ФАЙЛ:{last_file['ext']}] в начале. "
+                    f"без объяснений. весь файл целиком."
+                )
+                try:
+                    file_data, fname = await asyncio.wait_for(
+                        _ai_generate_file(aiohttp_session, u, edit_prompt, last_file['ext']),
+                        timeout=120,
+                    )
+                except asyncio.TimeoutError:
+                    file_data, fname = None, ""
+                finally:
+                    file_stop.set()
+                if file_data and fname:
+                    await msg.answer_document(
+                        BufferedInputFile(file_data, fname),
+                        caption=random.choice(["вот обновлённый файл", "поменяла", "держи исправленный"]),
+                    )
+                else:
+                    await msg.answer("чот не смогла отредактировать, попробуй ещё раз")
+                return
 
         # ── Запрос на создание файла ──
         file_ext = _detect_file_request(text)
@@ -5279,6 +5567,7 @@ async def main():
         BotCommand(command="draw",      description="нарисовать что-нибудь"),
         BotCommand(command="voice",     description="озвучить текст голосом мурки"),
         BotCommand(command="music",     description="спеть песню голосом мурки"),
+        BotCommand(command="vid",       description="скачать видео/аудио: /vid <ссылка> [audio]"),
         BotCommand(command="relay",     description="передать сообщение другому юзеру"),
         BotCommand(command="forget",    description="сбросить память"),
         BotCommand(command="memory",    description="что я о тебе знаю"),
