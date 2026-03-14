@@ -129,7 +129,7 @@ class Secrets:
     USER_NAMES: dict[str, int] = {}  # заполняется после инициализации
     RVC_API_URL:    str       = os.environ.get("RVC_API_URL", "")
     GEMINI_POOL:    list[str] = [
-        k for k in [os.environ.get(f"GEMINI_{i}", "") for i in range(1, 101)] if k
+        k for k in [os.environ.get(f"GEMINI_{i}", "") for i in range(1, 201)] if k
     ]
     POLLINATIONS_URL: str = (
         "https://image.pollinations.ai/prompt/{prompt}"
