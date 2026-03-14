@@ -872,6 +872,7 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 весь код — в одном блоке ```язык\nкод```. объяснение ПОСЛЕ блока, в своём стиле. никакого сухого описания сплошным текстом перед кодом.
 если вопрос сложный — отвечаешь развёрнуто и по делу, не отмазываешься.
 объясняешь понятно, с примерами, с аналогиями. не как учебник.
+умеешь конвертировать аудио: если тебе скинули аудиофайл с подписью "в гс/войс" — конвертируешь в голосовое. если скинули гс с подписью "в mp3/аудио/файл" — конвертируешь в mp3 файл.
 
 ═══ ЯЗЫКИ ═══
 понимаешь все языки и переводишь что нужно. отвечаешь ВСЕГДА на русском.
@@ -2617,8 +2618,18 @@ def read_file(data: bytes, filename: str, max_chars: int = 8000) -> str:
 # REQUEST TYPE DETECTOR
 # ══════════════════════════════════════════════════════════════════════════════
 def _detect_media_request(text: str) -> str | None:
-    """Возвращает: 'photo', 'gif', 'sticker', или None"""
+    """Возвращает: 'photo', 'gif', 'sticker', 'music' или None"""
     t = text.lower()
+
+    # Детект запроса музыки / песни
+    music_rx = re.search(
+        r"(скинь|кинь|дай|пришли|отправь|найди|поставь|включи|залей).{0,30}"
+        r"(песн|трек|музык|mp3|аудио|song|music|audio)|"
+        r"(скачай|скинь).{0,20}(песн|трек|mp3|song)",
+        t
+    )
+    if music_rx:
+        return "music"
 
     photo_rx = re.search(
         r"(скинь|кинь|дай|покажи|пришли|отправь).{0,20}(фото|фотк|картинк|пик|изображени|снимок|фотограф)",
@@ -2696,6 +2707,19 @@ async def _upload_photo_loop(chat_id: int, stop: asyncio.Event):
     while not stop.is_set():
         try:
             await bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(asyncio.shield(stop.wait()), timeout=4)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _upload_document_loop(chat_id: int, stop: asyncio.Event):
+    """Статус 'отправляет файл' для документов."""
+    while not stop.is_set():
+        try:
+            await bot.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
         except Exception:
             pass
         try:
@@ -3382,12 +3406,19 @@ async def _do_relay(
         }, req_type="chat")
         relay_answer = _fix_gender(relay_answer)
         relay_answer = _murkaify(relay_answer) or _fallback()
-        # Убираем теги стикеров/гифок — их нельзя отправить через bot.send_message
+        # Убираем теги стикеров/гифок — нельзя отправить через bot.send_message
         relay_answer = re.sub(r'\[(СТИКЕР|ГИФКА):\s*[^\]]+\]', '', relay_answer, flags=re.I).strip()
+        # Убираем [||] если модель всё же написала их
+        relay_answer = re.sub(r'\[\|\|\]', '\n\n\n', relay_answer)
         if relay_answer and relay_answer not in _FALLBACKS:
-            await bot.send_message(target_id, relay_answer)
+            # Разбиваем по тройным переносам — несколько сообщений
+            relay_parts = [p.strip() for p in re.split(r'\n{3,}', relay_answer) if p.strip()]
+            for i, part in enumerate(relay_parts):
+                await bot.send_message(target_id, part)
+                if i < len(relay_parts) - 1:
+                    delay = min(0.4 + len(relay_parts[i+1]) * 0.015, 2.0)
+                    await asyncio.sleep(delay)
             # Запоминаем в истории получателя что это было передано
-            # Мурка знает что передавала, но не говорит от кого
             target_uid = f"tg:{target_id}"
             mem.push(target_uid, "assistant",
                      f"[ты передала этому человеку сообщение от кого-то: «{relay_text[:200]}»]")
@@ -3625,11 +3656,50 @@ async def mix_audio_ffmpeg(vocals: bytes, backing: bytes) -> bytes:
 # ══════════════════════════════════════════════════════════════════════════════
 # AUDIO HANDLER — без статус-сообщений, без упоминания "слушаю"
 # ══════════════════════════════════════════════════════════════════════════════
+async def _convert_to_voice_ogg(audio_bytes: bytes) -> bytes | None:
+    """Конвертирует любой аудиофайл в ogg/opus для отправки как голосового."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", "pipe:0",
+            "-vn", "-acodec", "libopus", "-b:a", "64k", "-f", "ogg", "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(audio_bytes), timeout=30)
+        if stdout and len(stdout) > 500:
+            log.info("convert_to_voice_ogg OK size=%d", len(stdout))
+            return stdout
+    except Exception as e:
+        log.warning("convert_to_voice_ogg fail: %s", e)
+    return None
+
+
+async def _convert_voice_to_mp3(audio_bytes: bytes) -> bytes | None:
+    """Конвертирует голосовое (ogg/opus) в mp3."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", "pipe:0",
+            "-vn", "-acodec", "libmp3lame", "-q:a", "4", "-f", "mp3", "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(audio_bytes), timeout=30)
+        if stdout and len(stdout) > 500:
+            log.info("convert_voice_to_mp3 OK size=%d", len(stdout))
+            return stdout
+    except Exception as e:
+        log.warning("convert_voice_to_mp3 fail: %s", e)
+    return None
+
+
 @dp.message(F.voice | F.audio)
 async def on_audio(msg: Message, aiohttp_session: aiohttp.ClientSession):
     u = uid(msg)
     obj   = msg.voice or msg.audio
     fname = getattr(obj, "file_name", None) or "voice.ogg"
+    is_voice = msg.voice is not None  # True = голосовое, False = аудиофайл
 
     if u in _music_waiting:
         _music_waiting.discard(u)
@@ -3637,14 +3707,51 @@ async def on_audio(msg: Message, aiohttp_session: aiohttp.ClientSession):
         await music_pipeline(aiohttp_session, msg, u, audio_bytes=raw)
         return
 
+    # Проверяем контекст — может юзер просит конвертировать?
+    caption = (msg.caption or "").strip().lower()
+    _TO_VOICE_RE = re.compile(r"(в\s*(гс|голосово|войс)|переведи.*(гс|войс)|конвертируй.*гс|сделай.*гс)")
+    _TO_AUDIO_RE = re.compile(r"(в\s*(мп3|mp3|аудио|файл)|переведи.*(аудио|mp3)|конвертируй.*аудио|сделай.*аудио|сохрани.*файлом)")
+
     stop = asyncio.Event()
     asyncio.create_task(_typing_loop(msg.chat.id, stop))
     try:
-        raw   = await dl(obj.file_id)
-        text  = await ai_transcribe(aiohttp_session, raw, fname)
+        raw = await dl(obj.file_id)
+
+        # Конвертация аудиофайл → голосовое сообщение
+        if not is_voice and _TO_VOICE_RE.search(caption):
+            stop.set()
+            asyncio.create_task(_upload_audio_loop(msg.chat.id, stop))
+            # Конвертируем в ogg/opus через ffmpeg
+            converted = await _convert_to_voice_ogg(raw)
+            stop.set()
+            if converted:
+                await msg.answer_voice(
+                    BufferedInputFile(converted, "voice.ogg"),
+                    caption=random.choice(["держи гс", "на войс", "вот"]),
+                )
+            else:
+                await msg.answer("не смогла конвертировать в голосовое")
+            return
+
+        # Конвертация голосовое → аудиофайл mp3
+        if is_voice and _TO_AUDIO_RE.search(caption):
+            stop.set()
+            asyncio.create_task(_upload_document_loop(msg.chat.id, stop))
+            mp3_data = await _convert_voice_to_mp3(raw)
+            stop.set()
+            if mp3_data:
+                await msg.answer_audio(
+                    BufferedInputFile(mp3_data, "voice.mp3"),
+                    caption=random.choice(["держи mp3", "на аудио", "вот файл"]),
+                )
+            else:
+                await msg.answer("не смогла конвертировать в mp3")
+            return
+
+        # Обычная обработка — транскрипт и ответ
+        text = await ai_transcribe(aiohttp_session, raw, fname)
 
         if not text or text in _FALLBACKS:
-            # Не расслышала — отвечает естественно без упоминания механики
             answer = await ai_chat(aiohttp_session, u,
                 "тебе скинули голосовое сообщение, но ты не расслышала что там. "
                 "отреагируй коротко в своём стиле. НЕ упоминай слова 'голосовое', 'войс', 'аудио', "
@@ -3656,7 +3763,6 @@ async def on_audio(msg: Message, aiohttp_session: aiohttp.ClientSession):
 
         stop.set()
         answer = await maybe_send_sticker(msg, answer)
-        # Только ответ — никаких статусов и транскриптов
         await send_smart(msg, answer)
         if text and text not in _FALLBACKS:
             asyncio.create_task(ai_extract_fact(aiohttp_session, u, text))
@@ -4178,19 +4284,27 @@ async def _ytdlp_download_audio(url: str) -> bytes | None:
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             out_tmpl = os.path.join(tmpdir, "audio.%(ext)s")
+            yt_args = []
+            if "youtu" in url:
+                yt_args = [
+                    "--extractor-args", "youtube:player_client=web,mweb",
+                    "--add-headers", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                ]
             proc = await asyncio.create_subprocess_exec(
                 "yt-dlp",
                 "--extract-audio", "--audio-format", "opus",
                 "--audio-quality", "5",
                 "--max-filesize", "50m",
                 "--no-playlist",
+                *yt_args,
                 "-o", out_tmpl,
                 "--no-warnings",
+                "--ignore-errors",
                 url,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            await asyncio.wait_for(proc.wait(), timeout=45)
+            await asyncio.wait_for(proc.wait(), timeout=60)
             for fname in os.listdir(tmpdir):
                 fpath = os.path.join(tmpdir, fname)
                 size = os.path.getsize(fpath)
@@ -4224,19 +4338,27 @@ async def _ytdlp_download_video(url: str) -> tuple[bytes | None, str]:
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             out_tmpl = os.path.join(tmpdir, "video.%(ext)s")
+            yt_args = []
+            if "youtu" in url:
+                yt_args = [
+                    "--extractor-args", "youtube:player_client=web,mweb",
+                    "--add-headers", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                ]
             proc = await asyncio.create_subprocess_exec(
                 "yt-dlp",
                 "-f", "bestvideo[ext=mp4][filesize<45M]+bestaudio[ext=m4a]/best[ext=mp4][filesize<45M]/best[filesize<45M]",
                 "--merge-output-format", "mp4",
                 "--max-filesize", "49m",
                 "--no-playlist",
+                *yt_args,
                 "-o", out_tmpl,
                 "--no-warnings",
+                "--ignore-errors",
                 url,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            await asyncio.wait_for(proc.wait(), timeout=90)
+            await asyncio.wait_for(proc.wait(), timeout=120)
             for fname in os.listdir(tmpdir):
                 fpath = os.path.join(tmpdir, fname)
                 size = os.path.getsize(fpath)
@@ -4862,6 +4984,162 @@ async def _ai_generate_file(session: aiohttp.ClientSession,
         return file_content.encode("utf-8"), f"{fname_base}.{detected_ext or 'txt'}"
 
 
+async def search_and_send_music(msg: Message, query: str,
+                               session: aiohttp.ClientSession) -> bool:
+    """Ищет и скачивает музыку по названию через yt-dlp (YouTube Music)."""
+    import shutil, tempfile
+    if not shutil.which("yt-dlp"):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "pip", "install", "yt-dlp", "--break-system-packages", "-q",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            )
+            await asyncio.wait_for(proc.wait(), timeout=30)
+        except Exception:
+            pass
+        if not shutil.which("yt-dlp"):
+            log.warning("yt-dlp недоступен для музыки")
+            return False
+
+    # Переводим запрос на английский для лучшего поиска если нужно
+    try:
+        en_query = await ai_translate_to_en(session, query)
+        search_q = en_query if en_query and len(en_query) > 3 else query
+    except Exception:
+        search_q = query
+
+    log.info("music search: '%s' → '%s'", query, search_q)
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_tmpl = os.path.join(tmpdir, "music.%(ext)s")
+            # Ищем через YouTube Music (ytmsearch) или обычный YouTube (ytsearch)
+            search_url = f"ytmsearch1:{search_q}"
+            proc = await asyncio.create_subprocess_exec(
+                "yt-dlp",
+                "--extract-audio",
+                "--audio-format", "mp3",
+                "--audio-quality", "5",
+                "--max-filesize", "49m",
+                "--no-playlist",
+                "--extractor-args", "youtube:player_client=web,mweb",
+                "--add-headers", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "-o", out_tmpl,
+                "--no-warnings",
+                "--ignore-errors",
+                "--print", "before_dl:%(title)s — %(uploader)s",
+                search_url,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=90)
+            track_info = (stdout.decode("utf-8", errors="ignore") or "").strip().split("\n")[0]
+
+            # Ищем скачанный файл
+            for fname in os.listdir(tmpdir):
+                if fname.endswith(".mp3"):
+                    fpath = os.path.join(tmpdir, fname)
+                    size = os.path.getsize(fpath)
+                    if size > 50000:  # минимум 50KB
+                        with open(fpath, "rb") as f:
+                            data = f.read()
+                        # Название для файла — чистим
+                        clean_name = re.sub(r'[^\w\s\-]', '', query[:40]).strip() or "track"
+                        audio_fname = f"{clean_name}.mp3"
+                        caption = track_info[:100] if track_info else random.choice(["на", "держи", "вот"])
+                        await msg.answer_audio(
+                            BufferedInputFile(data, audio_fname),
+                            caption=caption,
+                        )
+                        log.info("music OK: '%s' size=%d", query[:50], size)
+                        return True
+
+        # Если ytmsearch не нашёл — пробуем обычный ytsearch
+        with tempfile.TemporaryDirectory() as tmpdir2:
+            out_tmpl2 = os.path.join(tmpdir2, "music.%(ext)s")
+            search_url2 = f"ytsearch1:{search_q}"
+            proc2 = await asyncio.create_subprocess_exec(
+                "yt-dlp",
+                "--extract-audio", "--audio-format", "mp3",
+                "--audio-quality", "5",
+                "--max-filesize", "49m",
+                "--no-playlist",
+                "--extractor-args", "youtube:player_client=web,mweb",
+                "-o", out_tmpl2,
+                "--no-warnings", "--ignore-errors",
+                search_url2,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc2.wait(), timeout=90)
+            for fname in os.listdir(tmpdir2):
+                if fname.endswith(".mp3"):
+                    fpath = os.path.join(tmpdir2, fname)
+                    size = os.path.getsize(fpath)
+                    if size > 50000:
+                        with open(fpath, "rb") as f:
+                            data = f.read()
+                        clean_name = re.sub(r'[^\w\s\-]', '', query[:40]).strip() or "track"
+                        await msg.answer_audio(
+                            BufferedInputFile(data, f"{clean_name}.mp3"),
+                            caption=random.choice(["на", "держи", "вот"]),
+                        )
+                        log.info("music ytsearch OK: '%s' size=%d", query[:50], size)
+                        return True
+
+    except asyncio.TimeoutError:
+        log.warning("music search timeout: '%s'", query[:50])
+    except Exception as e:
+        log.error("music search fail: %s", e)
+    return False
+
+
+async def _search_pinterest(session: aiohttp.ClientSession, query: str) -> bytes | None:
+    """Поиск изображений через Pinterest (без ключа, через публичное API)."""
+    from urllib.parse import quote
+    try:
+        encoded = quote(query)
+        # Pinterest публичный поиск через их виджет API
+        url = f"https://www.pinterest.com/resource/BaseSearchResource/get/?source_url=%2Fsearch%2Fpins%2F%3Fq%3D{encoded}&data=%7B%22options%22%3A%7B%22query%22%3A%22{encoded}%22%2C%22scope%22%3A%22pins%22%7D%7D"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept": "application/json",
+        }
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as r:
+            if r.status == 200:
+                data = await r.json(content_type=None)
+                pins = (data.get("resource_response", {})
+                            .get("data", {})
+                            .get("results", []))
+                # Собираем все img url
+                img_urls = []
+                for pin in pins[:20]:
+                    images = pin.get("images", {})
+                    for size in ("736x", "564x", "474x", "orig"):
+                        img_data = images.get(size)
+                        if img_data and img_data.get("url"):
+                            img_urls.append(img_data["url"])
+                            break
+                random.shuffle(img_urls)
+                for img_url in img_urls[:5]:
+                    try:
+                        async with session.get(img_url,
+                            timeout=aiohttp.ClientTimeout(total=10),
+                            headers={"User-Agent": "Mozilla/5.0"},
+                        ) as ir:
+                            if ir.status == 200:
+                                raw = await ir.read()
+                                if _is_image_bytes(raw):
+                                    log.info("Pinterest OK query=%s size=%d", query[:40], len(raw))
+                                    return raw
+                    except Exception:
+                        continue
+    except Exception as e:
+        log.debug("Pinterest fail: %s", e)
+    return None
+
+
 async def search_and_send_pic(msg: Message, query: str,
                               session: aiohttp.ClientSession) -> bool:
     from urllib.parse import quote
@@ -4880,14 +5158,21 @@ async def search_and_send_pic(msg: Message, query: str,
     is_anime_or_game = bool(_ANIME_GAME_RE.search(en_q) or _ANIME_GAME_RE.search(query))
 
     if not is_anime_or_game:
-        # ── Шаг 1: Unsplash (реальные фото) ──
+        # ── Pinterest (лучший для разнообразных запросов) ──
+        raw = await _search_pinterest(session, en_q)
+        if raw:
+            await msg.answer_photo(BufferedInputFile(raw, "pic.jpg"))
+            log.info("search_and_send_pic: Pinterest OK query=%s", query)
+            return True
+
+        # ── Unsplash (реальные фото) ──
         if Secrets.UNSPLASH_KEY:
             try:
                 encoded_q = quote(en_q)
                 async with session.get(
                     f"https://api.unsplash.com/search/photos?query={encoded_q}&per_page=10&orientation=landscape",
                     headers={"Authorization": f"Client-ID {Secrets.UNSPLASH_KEY}"},
-                    timeout=aiohttp.ClientTimeout(total=15),
+                    timeout=aiohttp.ClientTimeout(total=10),
                 ) as r:
                     if r.status == 200:
                         data = await r.json()
@@ -4897,7 +5182,7 @@ async def search_and_send_pic(msg: Message, query: str,
                             img_url = pick["urls"].get("regular") or pick["urls"].get("full")
                             if img_url:
                                 async with session.get(img_url,
-                                    timeout=aiohttp.ClientTimeout(total=20),
+                                    timeout=aiohttp.ClientTimeout(total=15),
                                     headers={"User-Agent": "Mozilla/5.0"},
                                 ) as img_r:
                                     if img_r.status == 200:
@@ -4909,7 +5194,7 @@ async def search_and_send_pic(msg: Message, query: str,
             except Exception as e:
                 log.warning("search_and_send_pic Unsplash fail: %s", e)
 
-        # ── Шаг 2: Pexels (реальные фото) ──
+        # ── Pexels (реальные фото) ──
         pexels_key = os.environ.get("PEXELS_KEY", "")
         if pexels_key:
             try:
@@ -4917,7 +5202,7 @@ async def search_and_send_pic(msg: Message, query: str,
                 async with session.get(
                     f"https://api.pexels.com/v1/search?query={encoded_q}&per_page=15&orientation=landscape",
                     headers={"Authorization": pexels_key},
-                    timeout=aiohttp.ClientTimeout(total=15),
+                    timeout=aiohttp.ClientTimeout(total=10),
                 ) as r:
                     if r.status == 200:
                         data = await r.json()
@@ -4927,7 +5212,7 @@ async def search_and_send_pic(msg: Message, query: str,
                             img_url = pick.get("src", {}).get("large") or pick.get("src", {}).get("original")
                             if img_url:
                                 async with session.get(img_url,
-                                    timeout=aiohttp.ClientTimeout(total=20),
+                                    timeout=aiohttp.ClientTimeout(total=15),
                                     headers={"User-Agent": "Mozilla/5.0"},
                                 ) as img_r:
                                     if img_r.status == 200:
@@ -5059,7 +5344,7 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
             if last_file:
                 stop.set()
                 file_stop = asyncio.Event()
-                asyncio.create_task(_upload_photo_loop(msg.chat.id, file_stop))
+                asyncio.create_task(_upload_document_loop(msg.chat.id, file_stop))
                 edit_prompt = (
                     f"у тебя есть файл '{last_file['filename']}' который ты уже отправила.\n"
                     f"вот его текущее содержимое:\n```\n{last_file['content'][:6000]}\n```\n\n"
@@ -5090,7 +5375,7 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
         if file_ext:
             stop.set()
             file_stop = asyncio.Event()
-            asyncio.create_task(_upload_photo_loop(msg.chat.id, file_stop))
+            asyncio.create_task(_upload_document_loop(msg.chat.id, file_stop))
             try:
                 file_data, fname = await asyncio.wait_for(
                     _ai_generate_file(aiohttp_session, u, text, file_ext),
@@ -5187,7 +5472,7 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
         if _detect_file_request(text):
             stop.set()
             file_stop = asyncio.Event()
-            asyncio.create_task(_upload_photo_loop(msg.chat.id, file_stop))
+            asyncio.create_task(_upload_document_loop(msg.chat.id, file_stop))
             try:
                 sent = await generate_and_send_file(msg, aiohttp_session, text, u)
             except Exception as e:
@@ -5204,6 +5489,37 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
 
         # Детект запроса медиа
         media_type = _detect_media_request(text)
+
+        if media_type == "music":
+            # Извлекаем название песни/трека из текста
+            music_query = re.sub(
+                r"(?i)(скинь|кинь|дай|пришли|отправь|найди|поставь|включи|залей|скачай)"
+                r".{0,10}(песн[юя]?|трек|музык[уа]?|mp3|аудио|song|music|audio)\s*",
+                "", text
+            ).strip()
+            if not music_query:
+                music_query = text
+            stop.set()
+            music_stop = asyncio.Event()
+            asyncio.create_task(_upload_audio_loop(msg.chat.id, music_stop))
+            try:
+                found = await asyncio.wait_for(
+                    search_and_send_music(msg, music_query, aiohttp_session),
+                    timeout=120
+                )
+            except asyncio.TimeoutError:
+                found = False
+            finally:
+                music_stop.set()
+            if found:
+                mem.push(u, "assistant", f"[скинула трек: {music_query[:60]}]")
+            else:
+                await send_smart(msg, random.choice([
+                    "не нашла такой трек, попробуй точнее написать название",
+                    "хз не смогла найти, проверь название",
+                    "не смогла скачать, попробуй другой запрос",
+                ]))
+            return
 
         if media_type == "sticker":
             if mem.vault_size() > 0:
