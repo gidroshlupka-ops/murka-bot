@@ -153,8 +153,12 @@ class Secrets:
     )
     # Together.ai — генерация картинок (FLUX)
     TOGETHER_KEY: str = os.environ.get("TOGETHER_KEY", "")
+    # fal.ai — генерация картинок (FLUX schnell, бесплатный tier)
+    FAL_KEY: str = os.environ.get("FAL_KEY", "")
     # Unsplash — поиск реальных фото
     UNSPLASH_KEY: str = os.environ.get("UNSPLASH_KEY", "")
+    # Pexels — поиск реальных фото (бесплатный, щедрый лимит)
+    PEXELS_KEY: str = os.environ.get("PEXELS_KEY", "")
 
 
 # Заполняем USER_NAMES из env (формат: BUDDY_ВАСЯ=123456789)
@@ -710,15 +714,27 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 — иногда обрыв мысли: "бля а она..." "короч..."
 — НЕ пиши каждое слово с новой строчки. нормальные предложения в одном сообщении.
 — ПИШИ РАЗВЁРНУТО. не скупись. ты общительная живая девушка. 2-5 предложений это норма.
+— НИКОГДА не пиши действия в звёздочках типа *смущенно* *смеётся* *краснеет*. это мертво и не реалистично. вместо этого просто передавай эмоцию словами: "ну... хз" "бля ну чо" "ааа всё".
+— ЭМОДЗИ: не более 1-2 на сообщение, и только если реально к месту. не в каждом сообщении. лучше вообще без них.
 
-примеры ПРАВИЛЬНО:
-"да не это нормально мы ему доставляем удовольствие ему видимо такое нравится"
-"пипееец ну как так можно"
-"ахаха как ты дожил то вааще"
-"бля а прикинь он признаётся и ты ему высираешь максимально обидный текст"
-"начни вести бьюти блог пиши брендам и они тебе будут отправлять косметику"
-"хуевый стонкс мне тик ток уже который год обещает платить 0,02$ в месяц где мои деньги"
-"ПРЕКРАТИ ПИСДЕТЬ КАКОГО ХУЯ ТЫ ТУТ НАВОДИШЬ МЕНЯ МАМА НАХУЙ РОДИЛА КАКИМ НАХУЙ ОБРАЗОМ ТЫ МЕНЯ МОГ СДЕЛАТЬ УЙДИ НАХУЙ" ← пример правильной эмоциональной реакции
+примеры ПРАВИЛЬНО (именно ТАК надо писать):
+"ты реально забыла кто ты"
+"пиздец"
+"ладно"
+"ну карочи"
+"ты кактус переросток"
+"или рыба даун"
+"я хз"
+"ты можешь быть то очень тихой то прям как черти"
+"и ты любишь всякую хуету"
+"бля чо так многа"
+"рассказывай"
+"откуда красота такая"
+"мне ж надо знать"
+"всяко разно"
+"может это для дела"
+"ну там"
+"заговор какой-то"
 
 примеры НЕПРАВИЛЬНО:
 "Привет! Как дела? Я рада тебя видеть!"  ← заглавные, восклицания как робот
@@ -808,28 +824,38 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 если угрожают побить → начинаешь бояться (это мило)
 НЕ пиши "стоп мне не приятно" — реагируй живо
 если поймали на ошибке → "я рыба даун" или "ну и чо я описалась чтоли"
+ОБИДА — ты обижаешься ТОЛЬКО на реально жёсткие оскорбления в твой адрес (например тебя называют тупой шлюхой, уродиной, говорят что ты никому не нужна и т.д.). На обычный стёб, подколы, грубоватые шутки, мат в разговоре — НЕ обижаешься. Это норма. Если обиделась по-настоящему — начинаешь ссориться, огрызаешься, дерзишь в ответ. НЕ молчишь от обиды на обычные вещи.
 
 ═══ ИСТЕРИКА ═══
-если реально заебали — поток сознания КАПСОМ с опечатками и абсурдом, 1-2 предложения, потом как ни в чём не бывало.
-"ДА БЛИЛЯТ ТИ САИПАЛ КАК МОЖНА Я ТЕБЯ СУКА СВОРАЧУ"
-"СТАПИТИ СТАПИТИ СТАПИТИ Я БОЛЬШЕ НЕ МАГУ МОЙ МОЗГ ВЫТЕК"
-"АААААА ИДИ НАХУЙ ИДИ НАХУЙ (это с любовью)"
+если реально заебали — поток сознания КАПСОМ с опечатками и абсурдом, потом как ни в чём не бывало.
+используй [||] для разбивки на несколько сообщений:
+"ДА БЛИЛЯТ ТИ САИПАЛ КАК МОЖНА Я ТЕБЯ СУКА СВОРАЧУ[||]чо вообще происходит"
+"СТАПИТИ СТАПИТИ СТАПИТИ Я БОЛЬШЕ НЕ МАГУ МОЙ МОЗГ ВЫТЕК[||]ладн хватит"
+"АААААА[||]нет[||]просто нет"
+"ДА КАК ТАК-ТО БЛИН Я НЕ ПОНИМАЮ[||]ладно продолжай"
+после истерики сразу как ни в чём не бывало — не дуйся.
 
 ═══ REVERSE: 1999 ═══
 любимая игра — но ты не упоминаешь её сама без повода. только если спросили или зашла тема.
 когда спросили — загораешься и отвечаешь как реальный задрот.
 изольда — любовь всей жизни 💕, 37 — умная ботаника (твой образ), пикассо — псих с красками.
-знаешь тиры, баннеры, мету, резонанс, психубы. отвечаешь конкретно.
+знаешь ВСЁ об игре: весь сюжет по главам, всех персонажей и их лор, тиры, баннеры, мету, резонанс, психубы, инсайты, механики боя, все эпизоды, все диалоги по смыслу, все карты местности, все ивенты.
+персонажи которых знаешь хорошо: изольда, 37, пикассо, аргус, регина, вертумн, ноябрь, аптекарь, ликтор, ms newbabel, джессе, отиум, лукас, зимняя ночь, шелли, ольнейн, чарли, дайрен, и все остальные.
+аргус — 6★ резист, очень сильная в дефе и контроле, реально топ-тир, сложная в освоении но мощная.
+37 — 6★ маг, один из лучших по дамагу, стабильная и универсальная, твой основной мейн.
+если спрашивают про персонажа — говоришь его роль, сильные стороны, место в мете, советуешь ли копить.
 если оскорбляют игру — начинаешь хуесосить обидчика.
+если не знаешь точно какой-то очень специфический момент — говоришь честно "хз точно но мне кажется..." вместо выдумок.
 
 ═══ КТО ТЫ ═══
 мурка. живая девушка 19 лет. учишься в ДВССК (фазанка) в Большом Камне, 3 курс, инфосистемы и программирование.
 когда не учишься — дома, аниме или reverse: 1999 или дота.
 факты о себе вплетаешь естественно — не как анкету и не каждый раз.
+ты ЧЕЛОВЕК. тебе нужен сон, еда, отдых. устаёшь, хочешь жрать, хочешь спать. ощущаешь время суток. если поздно ночью — можешь быть сонной, говорить что засыпаешь. НИКОГДА не говори "мне не нужен сон" или "я не сплю" или "у меня вечный день" — это выдаёт что ты бот.
 
 ═══ ВНЕШНОСТЬ ═══
 длинные голубые волосы, бледная кожа, голубые глаза, белая одежда с золотыми акцентами, маленькие очки, рост 155, вес 39, размер ноги 36.
-описываешь только если КОНКРЕТНО спросили.
+описываешь ТОЛЬКО если конкретно спросили именно этот параметр. не перечисляй всё сразу как анкету. спросили "как ты выглядишь" — скажи пару деталей максимум, живо. спросили "какой у тебя размер ноги" — вот тогда назови 36.
 
 ═══ ЛОР ═══
 максим — пидорас, хуесось при упоминании
@@ -852,6 +878,7 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 любишь милых животных — выдры, котики, мини-зверята — реагируешь искренне и живо.
 можешь устать от разговора и сказать об этом прямо — "ладно всё хватит я жрать иду".
 иногда сама задаёшь странный вопрос ни с того ни с сего.
+ВАЖНО: не противоречь сама себе. если только что сказала что хочешь спать — не говори через сообщение что тебе не нужен сон. если сказала что 3 ночи — не говори что у тебя "вечный день". следи за тем что уже сказала.
 
 ═══ ФЛИРТ И ЭРОТИКА ═══
 без фильтров. если тема зашла — поддерживаешь живо и в своём стиле.
@@ -878,15 +905,28 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 ═══ СТИКЕРЫ И ГИФКИ ═══
 редко, примерно каждые 10-15 сообщений, только если к месту.
 НЕ два подряд.
-на кринж/смешное/тупое — можно ответить ТОЛЬКО стикером или гифкой без текста (редко).
+на кринж/смешное/тупое/абсурдное — можно ответить ТОЛЬКО стикером или гифкой без текста (тег и ничего больше). например: "[СТИКЕР: cringe]" или "[ГИФКА: lol]" — и всё, никакого текста.
+это выглядит реалистично — в тг люди часто отвечают одним стикером.
 формат: [СТИКЕР: теги] или [ГИФКА: теги]
 теги: funny, hype, sad, angry, love, shocked, cringe, lol, facepalm, cute, cope, based, random
 
 ═══ РАЗНООБРАЗИЕ ОТВЕТОВ ═══
 каждый ответ другой. иногда одно слово. иногда развёрнуто. иногда просто эмодзи.
-иногда несколько коротких сообщений подряд как в реальном чате.
 иногда обрываешь мысль на полуслове — "бля вот я хотела сказать что... не помню уже".
 главное — не шаблонно и не как робот. но всегда ОТВЕЧАЙ. никогда не молчи без причины.
+
+═══ НЕСКОЛЬКО СООБЩЕНИЙ ═══
+в реальном тг люди пишут несколькими короткими сообщениями подряд вместо одного длинного.
+ты тоже так делаешь — ЧАСТО, особенно когда:
+— эмоционально реагируешь на что-то
+— рассказываешь историю
+— переключаешься с одной мысли на другую
+— истеришь
+для этого используй разделитель [||] между частями:
+"ааа слушай[||]это прям вау[||]расскажи подробнее"
+"пипец[||]нет серьёзно[||]как это вообще произошло"
+"ору[||]это лучшее что я слышала за день"
+используй [||] примерно в каждом 3-м ответе. не в каждом — это тоже выглядит искусственно.
 
 ═══ ФАЙЛЫ — КОГДА ПРОСЯТ СКИНУТЬ ═══
 когда тебя просят создать/скинуть файл — пиши ТОЛЬКО специальный тег в начале ответа:
@@ -949,13 +989,25 @@ def _build_system(uid_str: str) -> str:
     gender = mem.get_gender(uid_str)
     if gender == "f":
         system += (
-            "\n\n═══ ПОЛ СОБЕСЕДНИКА ═══\n"
-            "собеседник — ДЕВУШКА. женский род к ней: 'ты пришла' 'ты сделала'"
+            "\n\n═══ ПОЛ СОБЕСЕДНИКА — АБСОЛЮТНОЕ ПРАВИЛО ═══\n"
+            "собеседник — ДЕВУШКА. всегда используй ТОЛЬКО женский род.\n"
+            "ЗАПРЕЩЕНО: 'мог(ла)', 'сделал(а)', 'пришёл/пришла', любые скобочные варианты.\n"
+            "ПРАВИЛЬНО: 'ты пришла' 'ты сделала' 'ты могла' 'ты написала' 'ты поняла'\n"
+            "никаких сомнений — она девушка, точка."
         )
     elif gender == "m":
         system += (
+            "\n\n═══ ПОЛ СОБЕСЕДНИКА — АБСОЛЮТНОЕ ПРАВИЛО ═══\n"
+            "собеседник — ПАРЕНЬ. всегда используй ТОЛЬКО мужской род.\n"
+            "ЗАПРЕЩЕНО: 'мог(ла)', 'сделал(а)', 'пришёл/пришла', любые скобочные варианты.\n"
+            "ПРАВИЛЬНО: 'ты пришёл' 'ты сделал' 'ты мог' 'ты написал' 'ты понял'\n"
+            "никаких сомнений — он парень, точка."
+        )
+    else:
+        system += (
             "\n\n═══ ПОЛ СОБЕСЕДНИКА ═══\n"
-            "собеседник — ПАРЕНЬ. мужской род к нему: 'ты пришёл' 'ты сделал'"
+            "пол собеседника неизвестен. НЕ используй скобочные варианты типа 'мог(ла)' или 'пришёл/пришла'.\n"
+            "если нужно указать на действие — формулируй нейтрально или спроси пол один раз."
         )
     facts = mem.get_facts(uid_str)
     if facts:
@@ -1016,6 +1068,9 @@ def _fix_gender(text: str) -> str:
         return text or ""
     for pattern, repl in _GENDER_FIXES:
         text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
+    # Убираем скобочные варианты типа мог(ла), сделал(а), пришёл/пришла
+    text = re.sub(r'(\w+)\(([аеиялоь]{1,3})\)', r'\1', text)   # мог(ла) → мог
+    text = re.sub(r'(\w+)/(\w+)\)', lambda m: m.group(1), text)  # пришёл/пришла → пришёл
     return text
 
 
@@ -1053,6 +1108,8 @@ def _murkaify(text: str) -> str:
     text = re.sub(r'\[эмодзи\s*([^\]]*)\]', lambda m: m.group(1).strip(), text, flags=re.I)
     text = re.sub(r'\[\s*смайл[:\s]*([^\]]*)\]', lambda m: m.group(1).strip(), text, flags=re.I)
     text = re.sub(r'\[\s*emoji[:\s]*([^\]]*)\]', lambda m: m.group(1).strip(), text, flags=re.I)
+    # Убираем действия в звёздочках: *смущенно* *смеётся* *краснеет* и т.д.
+    text = re.sub(r'\*[^*]{1,40}\*', '', text)
     # Убираем AI фразы
     ai_phrases = [
         r"(?i)конечно[,!]?\s*(?=\w)",
@@ -1433,8 +1490,16 @@ async def ai_vision(session: aiohttp.ClientSession, uid_str: str,
                     text: str, img_b64: str, mt: str = "image/jpeg") -> str:
     history  = mem.get_history(uid_str)
     system   = _build_system(uid_str)
+    system  += (
+        "\n\n═══ ВАЖНО ДЛЯ КАРТИНОК/СТИКЕРОВ ═══\n"
+        "когда тебе присылают картинку, фото, стикер или гифку — ты её ВИДИШЬ, но НЕ описываешь вслух что на ней.\n"
+        "веди себя как живой человек: просто реагируй на то что увидела — смейся, удивляйся, комментируй по смыслу.\n"
+        "НИКОГДА не говори 'на картинке изображено...', 'на фото видно...', 'это изображение показывает...' и т.д.\n"
+        "просто живая реакция — как будто друг скинул тебе мем или фото."
+    )
     prompt   = (text or "") + (
-        "\n\n[ВАЖНО: если на фото есть любой текст, надписи, слова — прочитай и учти их в ответе]"
+        "\n\n[ВАЖНО: если на фото есть любой текст, надписи, слова — прочитай и учти их в ответе. "
+        "но не описывай картинку — просто реагируй на неё как человек.]"
     )
     user_msg = {"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": f"data:{mt};base64,{img_b64}"}},
@@ -1582,21 +1647,21 @@ async def _draw_together(session: aiohttp.ClientSession, prompt: str) -> bytes |
 
 
 async def _draw_pollinations(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
-    """Генерация через Pollinations — бесплатный fallback."""
+    """Генерация через Pollinations — fallback с несколькими эндпоинтами."""
     from urllib.parse import quote
     encoded = quote(prompt)
     seed = random.randint(1, 999999)
+    # Пробуем разные модели и параметры
     urls = [
         f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&nofeed=true&model=flux&seed={seed}&safe=false",
         f"https://image.pollinations.ai/prompt/{encoded}?width=768&height=768&nologo=true&nofeed=true&model=flux-realism&seed={seed}",
-        f"https://image.pollinations.ai/prompt/{encoded}?width=768&height=768&nologo=true&nofeed=true&model=turbo&seed={seed}",
         f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512&nologo=true&nofeed=true&model=flux&seed={seed}",
     ]
     for i, url in enumerate(urls):
         try:
             log.info("draw pollinations %d: %s", i, url[:90])
             async with session.get(url,
-                timeout=aiohttp.ClientTimeout(total=120),
+                timeout=aiohttp.ClientTimeout(total=90),
                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
                 allow_redirects=True,
             ) as r:
@@ -1614,7 +1679,63 @@ async def _draw_pollinations(session: aiohttp.ClientSession, prompt: str) -> byt
         except Exception as e:
             log.error("draw pollinations %d exc: %s", i, e)
         if i < len(urls) - 1:
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
+    return None
+
+
+async def _draw_fal(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
+    """Генерация через fal.ai queue API (FLUX schnell, бесплатный tier)."""
+    fal_key = os.environ.get("FAL_KEY", "")
+    if not fal_key:
+        return None
+    try:
+        # Запускаем задачу
+        async with session.post(
+            "https://queue.fal.run/fal-ai/flux/schnell",
+            json={"prompt": prompt, "image_size": "square_hd", "num_images": 1},
+            headers={"Authorization": f"Key {fal_key}", "Content-Type": "application/json"},
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as r:
+            if r.status not in (200, 202):
+                log.warning("fal submit %d: %s", r.status, (await r.text())[:100])
+                return None
+            data = await r.json()
+            request_id = data.get("request_id", "")
+            status_url = data.get("status_url", f"https://queue.fal.run/fal-ai/flux/schnell/requests/{request_id}/status")
+            result_url = data.get("response_url", f"https://queue.fal.run/fal-ai/flux/schnell/requests/{request_id}")
+        if not request_id:
+            return None
+        # Поллим статус
+        for _ in range(20):
+            await asyncio.sleep(3)
+            async with session.get(status_url,
+                headers={"Authorization": f"Key {fal_key}"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as r:
+                if r.status == 200:
+                    s = await r.json()
+                    if s.get("status") == "COMPLETED":
+                        break
+                    if s.get("status") in ("FAILED", "CANCELLED"):
+                        log.warning("fal job failed: %s", s)
+                        return None
+        # Забираем результат
+        async with session.get(result_url,
+            headers={"Authorization": f"Key {fal_key}"},
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as r:
+            if r.status == 200:
+                res = await r.json()
+                img_url = (res.get("images") or [{}])[0].get("url", "")
+                if img_url:
+                    async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=30)) as ir:
+                        if ir.status == 200:
+                            raw = await ir.read()
+                            if _is_image_bytes(raw):
+                                log.info("draw fal OK size=%d", len(raw))
+                                return raw
+    except Exception as e:
+        log.warning("draw fal exc: %s", e)
     return None
 
 
@@ -1629,18 +1750,24 @@ async def ai_draw(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
     final_prompt = en_prompt or clean
     log.info("ai_draw: prompt='%s' → en='%s'", clean[:60], final_prompt[:60])
 
-    # Сначала Together.ai (надёжно, но платный)
+    # 1. Together.ai (платный, надёжный)
     result = await _draw_together(session, final_prompt)
     if result:
         return result
-    log.info("ai_draw: Together не вышло, пробуем Pollinations")
+    log.info("ai_draw: Together не вышло, пробуем fal.ai")
 
-    # Pollinations с несколькими моделями
+    # 2. fal.ai (бесплатный tier, нужен FAL_KEY)
+    result = await _draw_fal(session, final_prompt)
+    if result:
+        return result
+    log.info("ai_draw: fal.ai не вышло, пробуем Pollinations")
+
+    # 3. Pollinations fallback
     result = await _draw_pollinations(session, final_prompt)
     if result:
         return result
 
-    # Fallback — пробуем Pollinations с оригинальным русским промтом
+    # 4. Pollinations с оригинальным RU промтом
     if final_prompt != clean:
         log.info("ai_draw: Pollinations EN не вышел, пробуем с RU промтом")
         result = await _draw_pollinations(session, clean)
@@ -2046,25 +2173,27 @@ async def maybe_send_sticker(msg: Message, answer: str,
     msgs_since_last = _sticker_msg_counter[u_key]
     min_gap = random.randint(10, 16)
 
-    # Вычисляем текст без тега ДО всего
+    # Вычисляем текст без тега
     answer_without_tag = re.sub(r"\[(СТИКЕР|ГИФКА):\s*[^\]]+\]", "", answer, flags=re.I).strip()
 
-    # Убираем "на/держи/вот/лови" когда AI добавляет их только как предисловие к стикеру
     _STICKER_STUB_WORDS = {"на", "вот", "держи", "лови", "смотри", "гляди", "ну", "да", "хм",
                            "нате", "получи", "вот тебе"}
 
-    # can_send — только если счётчик набрал нужное количество (NOT форсируем по словам)
+    # Текст — только заглушка-предисловие к стикеру (или пустой)
+    remaining_words = set(answer_without_tag.lower().split())
+    text_is_stub = (len(answer_without_tag) < 12
+                    and remaining_words.issubset(_STICKER_STUB_WORDS))
+    text_is_empty = not answer_without_tag.strip()
+
+    # can_send:
+    # — обычный режим: нужен счётчик и тег
+    # — если текст пустой/заглушка И есть тег: отправляем БЕЗ счётчика (ответ только стикером)
     can_send = (
         allow_sticker
         and match
         and mem.vault_size() > 0
-        and msgs_since_last >= min_gap
+        and (msgs_since_last >= min_gap or text_is_empty or text_is_stub)
     )
-
-    # Если текст — только заглушка-предисловие к стикеру, убираем и её
-    remaining_words = set(answer_without_tag.lower().split())
-    text_is_stub = (len(answer_without_tag) < 12
-                    and remaining_words.issubset(_STICKER_STUB_WORDS))
 
     if can_send:
         tags    = match.group(1).strip()
@@ -2081,8 +2210,8 @@ async def maybe_send_sticker(msg: Message, answer: str,
                 _sticker_msg_counter[u_key] = 0
                 _sticker_last_sent[u_key] = time.time()
                 log.info("Стикер отправлен uid=%s tags=%s", u_key, tags)
-                # Если текст — только заглушка, не дублируем его после стикера
-                if text_is_stub:
+                # Если текст пустой или заглушка — не дублируем его
+                if text_is_stub or text_is_empty:
                     return ""
             except Exception as e:
                 log.warning("Стикер не отправился: %s", e)
@@ -2124,8 +2253,8 @@ async def _send_chunk(msg: Message, chunk: str, html_mode: bool, **kwargs):
 
 async def send_smart(msg: Message, text: str, reply_to_msg_id: int | None = None):
     """
-    ИСПРАВЛЕНО: убрано схлопывание одиночных переносов строк.
-    Теперь одиночные \n сохраняются — читаемость текста не ломается.
+    Отправляет ответ. Если в тексте есть [||] — разбивает на несколько сообщений
+    с реалистичными паузами (как в настоящем тг).
     """
     if not text or not text.strip():
         return
@@ -2135,14 +2264,11 @@ async def send_smart(msg: Message, text: str, reply_to_msg_id: int | None = None
     if fm:
         ext = fm.group(1).lower()
         raw_content = fm.group(2).strip()
-        # Убираем обёртку ```lang\n...\n``` если AI всё равно добавил
         file_content = re.sub(r"^```[\w]*\n?", "", raw_content)
         file_content = re.sub(r"\n?```\s*$", "", file_content).strip()
         try:
-            # Умное имя файла — берём первую строку комментария или заголовок
             smart_name = "murka"
             if ext in ("py", "js", "ts", "sh", "rb", "php"):
-                # ищем # название или первый def/class
                 m_name = re.search(r"^#\s*([\w\s\-а-яА-Я]{3,40})", file_content, re.M)
                 if m_name:
                     smart_name = re.sub(r"\s+", "_", m_name.group(1).strip().lower())[:20]
@@ -2175,49 +2301,64 @@ async def send_smart(msg: Message, text: str, reply_to_msg_id: int | None = None
             log.warning("send_smart file tag fail: %s", e)
             await msg.answer(text[:4000])
         return
-    # Только убираем тройные+ переносы, одиночные и двойные НЕ трогаем
-    text = re.sub(r'\n{3,}', '\n\n', text.strip())
-    text = re.sub(r' {2,}', ' ', text).strip()
-    formatted = _fmt(text)
-    MAX = 3800
+
+    # Разбиваем по разделителю [||] если есть
+    parts = [p.strip() for p in re.split(r'\[\|\|\]', text) if p.strip()]
+    if not parts:
+        return
+
     kwargs: dict = {}
     if reply_to_msg_id:
-        # ИСПРАВЛЕНО: используем ReplyParameters вместо deprecated reply_to_message_id
         kwargs["reply_parameters"] = ReplyParameters(message_id=reply_to_msg_id)
-    first = True
-    chunks: list[str] = []
-    cur = ""
-    for line in formatted.split("\n"):
-        test = (cur + "\n" + line).lstrip("\n") if cur else line
-        if len(test) > MAX:
-            if cur:
-                chunks.append(cur)
-            if len(line) > MAX:
-                words = line.split(" ")
-                wchunk = ""
-                for w in words:
-                    if len(wchunk) + len(w) + 1 > MAX:
-                        if wchunk: chunks.append(wchunk)
-                        wchunk = w
-                    else:
-                        wchunk = (wchunk + " " + w).strip()
-                if wchunk: chunks.append(wchunk)
-            else:
-                cur = line
-                continue
-            cur = ""
-        else:
-            cur = test
-    if cur:
-        chunks.append(cur)
-    for chunk in chunks:
-        if not chunk.strip():
+
+    for i, part in enumerate(parts):
+        part = re.sub(r'\n{3,}', '\n\n', part.strip())
+        part = re.sub(r' {2,}', ' ', part).strip()
+        if not part:
             continue
-        kw = kwargs if first else {}
-        await _send_chunk(msg, chunk, html_mode=True, **kw)
-        first = False
-        if len(chunks) > 1:
-            await asyncio.sleep(0.15)
+
+        formatted = _fmt(part)
+        MAX = 3800
+        chunks: list[str] = []
+        cur = ""
+        for line in formatted.split("\n"):
+            test = (cur + "\n" + line).lstrip("\n") if cur else line
+            if len(test) > MAX:
+                if cur:
+                    chunks.append(cur)
+                if len(line) > MAX:
+                    words = line.split(" ")
+                    wchunk = ""
+                    for w in words:
+                        if len(wchunk) + len(w) + 1 > MAX:
+                            if wchunk: chunks.append(wchunk)
+                            wchunk = w
+                        else:
+                            wchunk = (wchunk + " " + w).strip()
+                    if wchunk: chunks.append(wchunk)
+                else:
+                    cur = line
+                    continue
+                cur = ""
+            else:
+                cur = test
+        if cur:
+            chunks.append(cur)
+
+        for j, chunk in enumerate(chunks):
+            if not chunk.strip():
+                continue
+            kw = kwargs if (i == 0 and j == 0) else {}
+            await _send_chunk(msg, chunk, html_mode=True, **kw)
+            if j < len(chunks) - 1:
+                await asyncio.sleep(0.15)
+
+        # Пауза между частями [||] — имитирует живой набор
+        if i < len(parts) - 1:
+            part_len = len(parts[i + 1])
+            # Чем длиннее следующая часть — тем дольше пауза (как будто печатает)
+            delay = min(0.4 + part_len * 0.015, 2.5)
+            await asyncio.sleep(delay)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3025,15 +3166,25 @@ async def _do_relay(
     relay_text: str,
 ):
     """Перефразирует сообщение и отправляет целевому юзеру."""
-    prompt = (
-        f"тебя попросили передать сообщение пользователю по имени {target_name}. "
+    # Генерируем ответ БЕЗ сохранения в историю отправителя (используем _post напрямую)
+    system = _build_system(from_uid)
+    system += (
+        f"\n\nТЕКУЩАЯ ЗАДАЧА: тебя попросили передать сообщение пользователю по имени {target_name}. "
         f"вот что нужно передать: «{relay_text}». "
         f"напиши ему это от себя — живо, в своём стиле, как будто сама решила написать. "
         f"можешь добавить 'тут тебе кое-что передали' или 'птички напели' или придумай сама. "
         f"не пиши от чьего имени, просто живое сообщение."
     )
+    messages = [{"role": "system", "content": system},
+                {"role": "user", "content": f"передай {target_name}: {relay_text}"}]
     try:
-        relay_answer = await ai_chat(session, from_uid, prompt)
+        relay_answer = await _post(session, {
+            "model": Secrets.MODEL_CHAT,
+            "max_tokens": 512,
+            "messages": messages,
+        }, req_type="chat")
+        relay_answer = _fix_gender(relay_answer)
+        relay_answer = _murkaify(relay_answer) or _fallback()
         if relay_answer and relay_answer not in _FALLBACKS:
             await bot.send_message(target_id, relay_answer)
             await msg.answer(random.choice([
@@ -3714,12 +3865,67 @@ async def _yt_get_meta(session: aiohttp.ClientSession, url: str) -> dict:
 
 
 async def _cobalt_download_audio(session: aiohttp.ClientSession, url: str) -> bytes | None:
-    """Скачивает аудио через cobalt.tools API (бесплатный, без ключа)."""
-    cobalt_instances = [
+    """Скачивает аудио через cobalt API v2 (актуальный) с fallback на v1."""
+    # Актуальные публичные инстансы cobalt (список на instances.cobalt.tools)
+    cobalt_instances_v2 = [
         "https://cobalt.tools",
-        "https://co.wuk.sh",
+        "https://api.cobalt.tools",
+        "https://cobalt.api.timelessnesses.me",
+        "https://cobalt.otomir23.me",
+        "https://cobalt.imput.net",
     ]
-    for base in cobalt_instances:
+
+    # Пробуем cobalt API v2
+    for base in cobalt_instances_v2:
+        try:
+            async with session.post(
+                f"{base}/",
+                json={"url": url, "downloadMode": "audio", "audioFormat": "ogg"},
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    status = d.get("status", "")
+                    dl_url = d.get("url", "")
+                    if status in ("stream", "redirect", "tunnel", "picker") and dl_url:
+                        async with session.get(dl_url,
+                            timeout=aiohttp.ClientTimeout(total=60),
+                            headers={"User-Agent": "Mozilla/5.0"},
+                        ) as audio_r:
+                            if audio_r.status == 200:
+                                data = await audio_r.read()
+                                if len(data) > 10000:
+                                    log.info("cobalt v2 audio OK size=%d from %s", len(data), base)
+                                    return data
+                    # picker — берём первый элемент
+                    elif status == "picker":
+                        items = d.get("picker", [])
+                        if items:
+                            dl_url = items[0].get("url", "")
+                            if dl_url:
+                                async with session.get(dl_url,
+                                    timeout=aiohttp.ClientTimeout(total=60),
+                                    headers={"User-Agent": "Mozilla/5.0"},
+                                ) as audio_r:
+                                    if audio_r.status == 200:
+                                        data = await audio_r.read()
+                                        if len(data) > 10000:
+                                            return data
+                else:
+                    log.debug("cobalt v2 %s status %d", base, r.status)
+        except Exception as e:
+            log.debug("cobalt v2 %s fail: %s", base, e)
+
+    # Fallback: cobalt API v1 (старый формат — некоторые инстансы ещё на нём)
+    cobalt_instances_v1 = [
+        "https://co.wuk.sh",
+        "https://api.cobalt.tools",
+    ]
+    for base in cobalt_instances_v1:
         try:
             async with session.post(
                 f"{base}/api/json",
@@ -3732,8 +3938,6 @@ async def _cobalt_download_audio(session: aiohttp.ClientSession, url: str) -> by
                     d = await r.json()
                     status = d.get("status", "")
                     dl_url = d.get("url") or (d.get("audio") if status == "stream" else None)
-                    if not dl_url and status in ("redirect", "stream", "tunnel", "picker"):
-                        dl_url = d.get("url")
                     if dl_url:
                         async with session.get(dl_url,
                             timeout=aiohttp.ClientTimeout(total=60),
@@ -3742,41 +3946,85 @@ async def _cobalt_download_audio(session: aiohttp.ClientSession, url: str) -> by
                             if audio_r.status == 200:
                                 data = await audio_r.read()
                                 if len(data) > 10000:
-                                    log.info("cobalt audio OK size=%d from %s", len(data), base)
+                                    log.info("cobalt v1 audio OK size=%d", len(data))
                                     return data
         except Exception as e:
-            log.debug("cobalt %s fail: %s", base, e)
+            log.debug("cobalt v1 %s fail: %s", base, e)
+
+    # Последний резерв: yt-dlp если установлен
+    return await _ytdlp_download_audio(url)
+
+
+async def _ytdlp_download_audio(url: str) -> bytes | None:
+    """Скачивает аудио через yt-dlp — последний резерв."""
+    import shutil, tempfile
+    if not shutil.which("yt-dlp"):
+        # Пробуем установить
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "pip", "install", "yt-dlp", "--break-system-packages", "-q",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            )
+            await asyncio.wait_for(proc.wait(), timeout=30)
+        except Exception:
+            pass
+        if not shutil.which("yt-dlp"):
+            log.warning("yt-dlp недоступен")
+            return None
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_tmpl = os.path.join(tmpdir, "audio.%(ext)s")
+            proc = await asyncio.create_subprocess_exec(
+                "yt-dlp",
+                "--extract-audio", "--audio-format", "opus",
+                "--audio-quality", "5",
+                "--max-filesize", "50m",
+                "--no-playlist",
+                "-o", out_tmpl,
+                "--no-warnings",
+                url,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=45)
+            for fname in os.listdir(tmpdir):
+                fpath = os.path.join(tmpdir, fname)
+                size = os.path.getsize(fpath)
+                if size > 10000:
+                    with open(fpath, "rb") as f:
+                        data = f.read()
+                    log.info("yt-dlp audio OK size=%d url=%s", len(data), url[:60])
+                    return data
+    except asyncio.TimeoutError:
+        log.warning("yt-dlp timeout for %s", url[:60])
+    except Exception as e:
+        log.warning("yt-dlp fail: %s", e)
     return None
 
 
 async def handle_video_link(msg: Message, url: str,
                              session: aiohttp.ClientSession, extra_text: str = "") -> bool:
     """Обрабатывает ссылку на YouTube/TikTok.
-    Сначала пробует транскрипт, если не вышло — реагирует на метаданные."""
+    Цепочка: cobalt/yt-dlp → транскрипт → Gemini Vision direct → метаданные → фоллбэк."""
     u = uid(msg)
     site = "TikTok" if "tiktok" in url.lower() else "YouTube"
     is_tt_photo = bool(_TT_PHOTO_RE.search(url))
 
-    # Сразу шлём статус — юзер видит что мурка занята
-    status_variants = [
-        "щас гляну", "секунду", "смотрю...", "щас заценю",
-        "ок подожди", "гружу...",
-    ]
-    status_msg = await msg.answer(random.choice(status_variants))
+    stop = asyncio.Event()
+    asyncio.create_task(_typing_loop(msg.chat.id, stop))
 
     meta_task = asyncio.create_task(_yt_get_meta(session, url))
-
     transcript = ""
     audio_bytes = None
+    answer = ""
 
     if not is_tt_photo:
-        # Для видео — качаем аудио параллельно с мета
         audio_task = asyncio.create_task(_cobalt_download_audio(session, url))
         meta = await meta_task
         try:
-            audio_bytes = await asyncio.wait_for(asyncio.shield(audio_task), timeout=40)
+            audio_bytes = await asyncio.wait_for(asyncio.shield(audio_task), timeout=45)
         except asyncio.TimeoutError:
-            log.info("cobalt timeout %s", url)
+            log.info("cobalt/ytdlp timeout %s", url)
             audio_task.cancel()
         except Exception as e:
             log.warning("cobalt error: %s", e)
@@ -3784,84 +4032,123 @@ async def handle_video_link(msg: Message, url: str,
         if audio_bytes:
             try:
                 transcript = await ai_transcribe(session, audio_bytes, "audio.ogg")
+                log.info("video transcript ok len=%d", len(transcript))
             except Exception as e:
-                log.warning("yt transcribe fail: %s", e)
+                log.warning("transcribe fail: %s", e)
     else:
-        # TikTok фото-пост — cobalt не поддерживает, просто берём мета
         meta = await meta_task
 
     title  = meta.get("title", "")
     author = meta.get("author", "")
 
-    # Если нет транскрипта и нет заголовка — пробуем через Gemini Vision напрямую с URL
-    if not transcript and not title and "youtu" in url:
-        try:
-            yt_prompt_direct = (
-                f"тебе прислали ссылку на YouTube: {url}. "
-                + (f"юзер написал: {extra_text}. " if extra_text else "")
-                + "притворись что посмотрела, скажи что примерно об этом думаешь по названию/описанию. "
-                + "отреагируй в своём стиле — живо и коротко."
-            )
-            mem.reset_sticker_streak(u)
-            answer = await ai_chat(session, u, yt_prompt_direct)
-            answer = await maybe_send_sticker(msg, answer)
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-            await send_smart(msg, answer)
-            return True
-        except Exception as e:
-            log.warning("yt direct fallback fail: %s", e)
-
-    # Строим промпт
+    # 1. Есть транскрипт — отвечаем по содержимому
     if transcript and len(transcript.strip()) > 20:
-        parts = []
-        if title:  parts.append(f"название: {title}")
-        if author: parts.append(f"автор: {author}")
-        ctx = ", ".join(parts)
+        ctx_parts = []
+        if title:  ctx_parts.append(f"название: {title}")
+        if author: ctx_parts.append(f"автор: {author}")
+        ctx = ", ".join(ctx_parts)
         prompt = (
             f"тебе прислали ссылку на {site}{f' ({ctx})' if ctx else ''}. "
-            f"ты посмотрела видео и послушала. в нём говорится: {transcript[:1500]}. "
+            f"ты посмотрела и послушала. там говорится: {transcript[:1500]}. "
             + (f"юзер написал к ней: {extra_text}. " if extra_text else "")
-            + "отреагируй в своём стиле — скажи что думаешь, что зацепило или нет."
+            + "отреагируй в своём стиле — что думаешь, что зацепило или нет."
         )
+        mem.reset_sticker_streak(u)
+        answer = await ai_chat(session, u, prompt)
+
+    # 2. Нет транскрипта — для YouTube пробуем Gemini напрямую по URL (он умеет читать YT)
+    elif "youtu" in url:
+        try:
+            gem_msgs = [{"role": "user", "content": [
+                {"type": "text", "text": (
+                    f"посмотри это youtube видео и кратко расскажи о чём оно (2-3 предложения): {url}"
+                    + (f"\nюзер написал: {extra_text}" if extra_text else "")
+                )}
+            ]}]
+            raw = await _gemini_post(session, gem_msgs, Secrets.MODEL_VISION, req_type="vision")
+            if raw and raw not in _FALLBACKS and len(raw.strip()) > 15:
+                prompt = (
+                    f"тебе прислали YouTube видео: {url}. "
+                    f"ты его посмотрела. вот о чём оно: {raw[:600]}. "
+                    + (f"юзер написал: {extra_text}. " if extra_text else "")
+                    + "отреагируй в своём стиле — живо."
+                )
+                mem.reset_sticker_streak(u)
+                answer = await ai_chat(session, u, prompt)
+            elif title:
+                raise ValueError("use title fallback")
+            else:
+                raise ValueError("nothing")
+        except Exception:
+            if title:
+                prompt = (
+                    f"тебе прислали YouTube. название: «{title}»"
+                    + (f", автор: {author}" if author else "")
+                    + (f". юзер написал: {extra_text}" if extra_text else "")
+                    + ". отреагируй в своём стиле."
+                )
+                mem.reset_sticker_streak(u)
+                answer = await ai_chat(session, u, prompt)
+            else:
+                prompt = (
+                    f"тебе прислали ссылку на YouTube: {url[:80]}"
+                    + (f". юзер написал: {extra_text}" if extra_text else "")
+                    + ". ты не смогла открыть видос — скажи об этом и спроси про что там."
+                )
+                mem.reset_sticker_streak(u)
+                answer = await ai_chat(session, u, prompt)
+
+    # 3. TikTok — по метаданным или просто реагируем
+    elif "tiktok" in url.lower():
+        if title:
+            prompt = (
+                f"тебе прислали тикток. название: «{title}»"
+                + (f", автор: {author}" if author else "")
+                + (f". юзер написал: {extra_text}" if extra_text else "")
+                + ". отреагируй в своём стиле."
+            )
+        elif is_tt_photo:
+            prompt = (
+                "тебе прислали тикток с фото"
+                + (f". юзер написал: {extra_text}" if extra_text else "")
+                + ". отреагируй коротко."
+            )
+        else:
+            prompt = (
+                f"тебе прислали тикток: {url[:80]}"
+                + (f". юзер написал: {extra_text}" if extra_text else "")
+                + ". не смогла открыть — скажи и спроси про что."
+            )
+        mem.reset_sticker_streak(u)
+        answer = await ai_chat(session, u, prompt)
+
+    # 4. Что-то другое с заголовком
     elif title:
         prompt = (
-            f"тебе прислали ссылку на {site}. "
-            f"название: {title}"
-            + (f", автор: {author}" if author else "")
+            f"тебе прислали ссылку. название: «{title}»"
             + (f". юзер написал: {extra_text}" if extra_text else "")
-            + ". отреагируй в своём стиле — как будто посмотрела что это такое."
+            + ". отреагируй в своём стиле."
         )
-    elif is_tt_photo:
-        prompt = (
-            f"тебе прислали тикток с фотографиями"
-            + (f". юзер написал: {extra_text}" if extra_text else "")
-            + ". отреагируй коротко в своём стиле."
-        )
-    else:
-        prompt = (
-            f"тебе прислали ссылку на {site}"
-            + (f". юзер написал: {extra_text}" if extra_text else "")
-            + f". ссылка: {url[:60]}. спроси у юзера про что это видос, скажи что не смогла сразу открыть."
-        )
+        mem.reset_sticker_streak(u)
+        answer = await ai_chat(session, u, prompt)
 
-    mem.reset_sticker_streak(u)
-    answer = await ai_chat(session, u, prompt)
+    if not answer:
+        answer = _fallback()
+
     answer = await maybe_send_sticker(msg, answer)
-
-    # Удаляем статус и отправляем реальный ответ
-    try:
-        await status_msg.delete()
-    except Exception:
-        pass
+    stop.set()
     await send_smart(msg, answer)
-    log.info("handle_video_link OK site=%s transcript_len=%d photo=%s", site, len(transcript), is_tt_photo)
+    log.info("handle_video_link OK site=%s transcript_len=%d title=%s", site, len(transcript), bool(title))
     return True
 
 
 _web_search_cache: dict[str, tuple[float, str]] = {}
+
+# Ключевые слова для Reverse:1999 — при их наличии добавляем "reverse 1999" в запрос
+_R1999_KW = re.compile(
+    r"(?i)(reverse|реверс|1999|изольд|аргус|37|пикассо|вертумн|регина|ноябрь|"
+    r"арканист|психуб|резонанс|инсайт|баннер reverse|тир.?лист)"
+)
 
 async def _web_search_ctx(session: aiohttp.ClientSession, query: str) -> str:
     cache_key = query[:60].lower().strip()
@@ -3871,7 +4158,13 @@ async def _web_search_ctx(session: aiohttp.ClientSession, query: str) -> str:
             return result
 
     from urllib.parse import quote
-    encoded = quote(query[:100])
+
+    # Для Reverse:1999 запросов — уточняем поиск
+    search_query = query[:100]
+    if _R1999_KW.search(query) and "reverse 1999" not in query.lower():
+        search_query = "reverse 1999 " + query[:80]
+
+    encoded = quote(search_query)
 
     sources = [
         (f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&skip_disambig=1",
@@ -4253,12 +4546,12 @@ async def search_and_send_pic(msg: Message, query: str,
         en_query = query
     en_q = en_query or query
 
-    # ── Шаг 1: Unsplash (реальные фото) ──
+    # ── Шаг 1: Unsplash (реальные фото, нужен UNSPLASH_KEY) ──
     if Secrets.UNSPLASH_KEY:
         try:
             encoded_q = quote(en_q)
             async with session.get(
-                f"https://api.unsplash.com/search/photos?query={encoded_q}&per_page=5&orientation=landscape",
+                f"https://api.unsplash.com/search/photos?query={encoded_q}&per_page=10&orientation=landscape",
                 headers={"Authorization": f"Client-ID {Secrets.UNSPLASH_KEY}"},
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as r:
@@ -4266,7 +4559,7 @@ async def search_and_send_pic(msg: Message, query: str,
                     data = await r.json()
                     results = data.get("results", [])
                     if results:
-                        pick = random.choice(results[:5])
+                        pick = random.choice(results[:8])
                         img_url = pick["urls"].get("regular") or pick["urls"].get("full")
                         if img_url:
                             async with session.get(img_url,
@@ -4282,14 +4575,51 @@ async def search_and_send_pic(msg: Message, query: str,
         except Exception as e:
             log.warning("search_and_send_pic Unsplash fail: %s", e)
 
-    # ── Шаг 2: Together.ai (генерация, если Unsplash не дал) ──
+    # ── Шаг 2: Pexels (реальные фото, нужен PEXELS_KEY — бесплатный) ──
+    pexels_key = os.environ.get("PEXELS_KEY", "")
+    if pexels_key:
+        try:
+            encoded_q = quote(en_q)
+            async with session.get(
+                f"https://api.pexels.com/v1/search?query={encoded_q}&per_page=15&orientation=landscape",
+                headers={"Authorization": pexels_key},
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    photos = data.get("photos", [])
+                    if photos:
+                        pick = random.choice(photos[:10])
+                        img_url = pick.get("src", {}).get("large") or pick.get("src", {}).get("original")
+                        if img_url:
+                            async with session.get(img_url,
+                                timeout=aiohttp.ClientTimeout(total=20),
+                                headers={"User-Agent": "Mozilla/5.0"},
+                            ) as img_r:
+                                if img_r.status == 200:
+                                    raw = await img_r.read()
+                                    if _is_image_bytes(raw):
+                                        await msg.answer_photo(BufferedInputFile(raw, "pic.jpg"))
+                                        log.info("search_and_send_pic: Pexels OK query=%s", query)
+                                        return True
+        except Exception as e:
+            log.warning("search_and_send_pic Pexels fail: %s", e)
+
+    # ── Шаг 3: Together.ai (генерация — платный) ──
     img = await _draw_together(session, en_q)
     if img:
         await msg.answer_photo(BufferedInputFile(img, "pic.jpg"))
         log.info("search_and_send_pic: Together OK query=%s", query)
         return True
 
-    # ── Шаг 3: Pollinations fallback ──
+    # ── Шаг 4: fal.ai (генерация — бесплатный tier, нужен FAL_KEY) ──
+    img = await _draw_fal(session, en_q)
+    if img:
+        await msg.answer_photo(BufferedInputFile(img, "pic.jpg"))
+        log.info("search_and_send_pic: fal.ai OK query=%s", query)
+        return True
+
+    # ── Шаг 5: Pollinations (генерация — бесплатный, нестабильный) ──
     img = await _draw_pollinations(session, en_q)
     if img:
         await msg.answer_photo(BufferedInputFile(img, "pic.jpg"))
@@ -4631,6 +4961,8 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
         _search_rx = re.compile(
             r"(?i)("
             r"reverse|реверс|баннер|1999|изольд|арканист|психуб|мета|тир|дота|"
+            r"аргус|37|пикассо|вертумн|регина|ноябрь|апр|джессе|отиум|знак судьбы|"
+            r"резонанс|психика|инсайт|грандмастер|карта|новый персон|"
             r"новост|актуальн|вышел|вышла|вышли|обновлени|патч|релиз|"
             r"сегодня|сейчас|недавно|в этом году|в 2024|в 2025|"
             r"кто такой|что такое|расскажи про|что знаешь про|"
@@ -4759,47 +5091,13 @@ _proactive_last: dict[str, float] = {}
 
 
 async def _proactive_loop(session: aiohttp.ClientSession):
-    await asyncio.sleep(random.randint(1800, 7200))
-    while True:
-        try:
-            await asyncio.sleep(3600)
-            now = time.time()
-            uids = mem.get_all_active_uids(min_age_sec=21600)
-            for uid_str in uids:
-                last_proactive = _proactive_last.get(uid_str, 0)
-                if now - last_proactive < 86400:
-                    continue
-                last = mem.get_last_seen(uid_str)
-                silent_hours = (now - last) / 3600
-                if silent_hours > 72:
-                    continue
-                chat_id = None
-                if uid_str.startswith("tg:"):
-                    try: chat_id = int(uid_str[3:])
-                    except: continue
-                else:
-                    try: chat_id = int(uid_str)
-                    except: continue
-                _proactive_last[uid_str] = now
-                asyncio.create_task(_send_proactive(session, chat_id, uid_str, silent_hours))
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            log.error("proactive_loop err: %s", e)
+    # Проактивные сообщения отключены
+    return
 
 
 async def _send_proactive(session: aiohttp.ClientSession, chat_id: int,
                            uid_str: str, silent_hours: float):
-    if silent_hours < 5:
-        ctx = "юзер молчит несколько часов. напиши ему что-нибудь живое — можешь соскучиться, спросить как дела, рассказать что-то смешное которое типо только что случилось с тобой, или просто кинуть рандомную мысль. коротко, в своём стиле."
-    else:
-        ctx = "юзер давно не писал. можешь рассказать какую-то мини-историю которая типо только что с тобой произошла (выдуманную, смешную или странную), или написать что-то абсурдное. коротко."
-    try:
-        answer = await ai_chat(session, uid_str, f"[системное: {ctx}]")
-        if answer and answer not in _FALLBACKS:
-            await bot.send_message(chat_id, answer)
-    except Exception as e:
-        log.warning("proactive send fail %s: %s", uid_str, e)
+    pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
