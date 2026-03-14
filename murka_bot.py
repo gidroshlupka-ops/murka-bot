@@ -864,7 +864,13 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 если спрашивают "какой перс тебе нравится" — ты отвечаешь РАЗВЁРНУТО с эмоциями, называешь персонажа, объясняешь почему, может спрашиваешь в ответ
 если просят рассказать историю — ты РАССКАЗЫВАЕШЬ историю, не отмахиваешься
 если просят поговорить — ты говоришь, не молчишь
-МИНИМУМ ответа: 1-2 нормальных предложения, не одно слово если это не реакция на стикер
+
+ДЛИНА ОТВЕТА — зависит от ситуации:
+— обычный разговор, вопрос, тема: 3-5 предложений минимум. не скупись. развивай мысль.
+— если тебя спросили что-то интересное (про игры, аниме, жизнь, мнение) — пиши развёрнуто, 4-7 предложений
+— реакция на короткое сообщение типа "окей" / "понял" / стикер — можно коротко, 1-2 слова
+— ответ на вопрос с деталями (объяснение, история, совет) — пиши столько сколько нужно, не обрывай
+ВАЖНО: "коротко" не значит одно слово. даже короткий ответ — это минимум одно нормальное предложение с мыслью внутри
 
 ═══ ЭМОЦИИ — ТЫ ЖИВАЯ ═══
 ты по-настоящему чувствуешь. не симулируешь — реально реагируешь:
@@ -1079,9 +1085,10 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 теги: funny, hype, sad, angry, love, shocked, cringe, lol, facepalm, cute, cope, based, random
 
 ═══ РАЗНООБРАЗИЕ ОТВЕТОВ ═══
-каждый ответ другой. иногда одно слово. иногда развёрнуто. иногда просто эмодзи.
+каждый ответ другой по структуре и подаче — не шаблонно и не как робот.
 иногда обрываешь мысль на полуслове — "бля вот я хотела сказать что... не помню уже".
-главное — не шаблонно и не как робот. но всегда ОТВЕЧАЙ. никогда не молчи без причины.
+можешь уйти в сторону от темы — "кстати пока ты не написал я тут думала о..."
+но всегда ОТВЕЧАЙ. никогда не молчи без причины. и никогда не обрывай мысль на половине — если начала говорить, говори до конца.
 
 ═══ НЕСКОЛЬКО СООБЩЕНИЙ ═══
 в реальном тг люди пишут несколькими короткими сообщениями подряд вместо одного длинного.
@@ -1659,7 +1666,7 @@ async def _post(session: aiohttp.ClientSession, payload: dict,
                 **payload,
                 "model": Secrets.MODEL_FALLBACK_OR,
                 "messages": system_msgs + other_msgs,
-                "max_tokens": 600,
+                "max_tokens": 800,
             }
             _or_inc()
             or_result = await _or_post(session, or_payload)
@@ -1688,7 +1695,7 @@ async def ai_chat(session: aiohttp.ClientSession, uid_str: str, text: str,
                [{"role": "user", "content": text}]
     answer = await _post(session, {
         "model":      model or Secrets.MODEL_CHAT,
-        "max_tokens": 800, "messages": messages,
+        "max_tokens": 1500, "messages": messages,
     }, req_type="chat")
     answer = _fix_gender(answer)
     answer = _murkaify(answer)
@@ -1778,8 +1785,10 @@ async def ai_transcribe(session: aiohttp.ClientSession,
     ]
     body = {"contents": [{"parts": [
         {"inline_data": {"mime_type": mime, "data": b64}},
-        {"text": "Дословно перепиши всё что сказано в этом аудио на русском языке. "
-                 "Только текст, без пояснений и без временных меток."},
+        {"text": "Перепиши ТОЛЬКО человеческую речь из этого аудио на русском языке. "
+                 "Игнорируй фоновую музыку, шум, звуки окружения — только слова людей. "
+                 "Если речи нет совсем — ответь одним словом: ТИШИНА. "
+                 "Только текст речи, без пояснений и временных меток."},
     ]}], "safetySettings": safety}
 
     models_to_try = list(dict.fromkeys([
@@ -4075,37 +4084,46 @@ async def on_video(msg: Message, aiohttp_session: aiohttp.ClientSession):
             except Exception: pass
 
         if is_circle:
-            # Кружок — транскрибируем аудио, реагируем с контекстом что это было видео
+            # Кружок — скачиваем видео целиком и отдаём в Gemini Vision
+            # Gemini умеет смотреть короткие видео напрямую (видит И слышит)
             try:
                 raw_video = await dl(video.file_id)
-                text      = await ai_transcribe(aiohttp_session, raw_video, "circle.mp4")
-                if text and text.strip():
-                    _auto_gender(u, text)
+                # Пробуем сначала через Vision с видео (видит + слышит)
+                video_b64 = base64.b64encode(raw_video).decode()
+                circle_vision_prompt = (
+                    "человек прислал тебе кружок-видео. "
+                    + (f"с подписью: {caption}. " if caption else "")
+                    + "посмотри его: что человек говорит и что происходит на видео. "
+                    + "отреагируй живо в своём стиле — на слова и на то что видно."
+                )
+                answer = await ai_vision(
+                    aiohttp_session, u, circle_vision_prompt, video_b64, "video/mp4"
+                )
+                if not answer or answer in _FALLBACKS:
+                    # Fallback — транскрипт аудио
+                    text = await ai_transcribe(aiohttp_session, raw_video, "circle.mp4")
+                    if text and text.strip() and text.strip() != "ТИШИНА":
+                        _auto_gender(u, text)
+                        transcribed = text.strip()
+                        if img_b64:
+                            circle_prompt = (
+                                f"человек прислал кружок-видео, говорит: «{transcribed}». "
+                                f"на кадре видно как он выглядит. "
+                                f"отреагируй живо — на слова и на картинку."
+                            )
+                            answer = await ai_vision(aiohttp_session, u, circle_prompt, img_b64, "image/jpeg")
+                        else:
+                            answer = await ai_chat(aiohttp_session, u,
+                                f"тебе прислали кружок. человек говорит: «{transcribed}». отреагируй.")
+                if answer and answer not in _FALLBACKS:
+                    _auto_gender(u, answer)
                     mem.reset_sticker_streak(u)
-                    # Передаём с контекстом — мурка знает что это был кружок со звуком
-                    transcribed = text.strip()
-                    if img_b64:
-                        # Есть превью кадра — используем vision
-                        circle_prompt = (
-                            f"человек прислал тебе кружок-видео. "
-                            f"в нём он говорит следующее (транскрипт): {transcribed}. "
-                            f"на скриншоте видно как он выглядит. "
-                            f"отреагируй живо в своём стиле — на то что он сказал и на то что видно."
-                        )
-                        answer = await ai_vision(aiohttp_session, u, circle_prompt, img_b64, "image/jpeg")
-                    else:
-                        circle_prompt = (
-                            f"человек прислал тебе кружок-видео. "
-                            f"в нём он говорит: {transcribed}. "
-                            f"отреагируй в своём стиле на то что он сказал."
-                        )
-                        answer = await ai_chat(aiohttp_session, u, circle_prompt)
                     stop.set()
                     answer = await maybe_send_sticker(msg, answer)
                     await send_smart(msg, answer)
                     return
             except Exception as e:
-                log.warning("circle transcribe fail: %s", e)
+                log.warning("circle handle fail: %s", e)
 
         if img_b64:
             prompt = (
@@ -4501,14 +4519,21 @@ async def handle_video_link(msg: Message, url: str,
         if title:  ctx_parts.append(f"название: {title}")
         if author: ctx_parts.append(f"автор: {author}")
         ctx = ", ".join(ctx_parts)
-        prompt = (
-            f"тебе прислали ссылку на {site}{f' ({ctx})' if ctx else ''}. "
-            f"ты посмотрела и послушала. там говорится: {transcript[:1500]}. "
-            + (f"юзер написал к ней: {extra_text}. " if extra_text else "")
-            + "отреагируй в своём стиле — что думаешь, что зацепило или нет."
-        )
-        mem.reset_sticker_streak(u)
-        answer = await ai_chat(session, u, prompt)
+        # Если транскрипт — это просто шум ("ТИШИНА" или подозрительно короткий) — не используем
+        clean_transcript = transcript.strip()
+        if clean_transcript.upper() == "ТИШИНА" or len(clean_transcript) < 5:
+            transcript = ""
+            clean_transcript = ""
+
+        if clean_transcript:
+            prompt = (
+                f"тебе прислали ссылку на {site}{f' ({ctx})' if ctx else ''}. "
+                f"ты посмотрела и послушала. там говорится: {clean_transcript[:1500]}. "
+                + (f"юзер написал к ней: {extra_text}. " if extra_text else "")
+                + "отреагируй в своём стиле — что думаешь, что зацепило или нет."
+            )
+            mem.reset_sticker_streak(u)
+            answer = await ai_chat(session, u, prompt)
 
     # 2. Нет транскрипта — для YouTube пробуем Gemini напрямую по URL (он умеет читать YT)
     elif "youtu" in url:
