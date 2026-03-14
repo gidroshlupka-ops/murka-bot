@@ -129,14 +129,14 @@ class Secrets:
     USER_NAMES: dict[str, int] = {}  # заполняется после инициализации
     RVC_API_URL:    str       = os.environ.get("RVC_API_URL", "")
     GEMINI_POOL:    list[str] = [
-        k for k in [os.environ.get(f"GEMINI_{i}", "") for i in range(1, 101)] if k
+        k for k in [os.environ.get(f"GEMINI_{i}", "") for i in range(1, 201)] if k
     ]
     POLLINATIONS_URL: str = (
         "https://image.pollinations.ai/prompt/{prompt}"
         "?width=1024&height=1024&nologo=true&enhance=true&model=flux"
     )
-    MODEL_CHAT:    str = "google/gemini-2.5-flash-lite"
-    MODEL_VISION:  str = "google/gemini-2.5-flash-lite"  # flash даёт только 20 RPD, lite — 1000 RPD
+    MODEL_CHAT:    str = "google/gemini-2.0-flash-lite-preview-02-05:free"
+    MODEL_VISION:  str = "google/gemini-2.0-flash-lite-preview-02-05:free"  # flash даёт только 20 RPD, lite — 1000 RPD
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
     # OR fallback список — только рабочие модели (убраны мёртвые endpoints)
     OR_FALLBACK_MODELS: list[str] = [
@@ -756,6 +756,7 @@ def _get_yt_cookie_args() -> list[str]:
 # SYSTEM PROMPT
 # ══════════════════════════════════════════════════════════════════════════════
 _BASE_SYSTEM = """ты мурка. не ии не языковая модель не гугл не антропик не клод не джемини. просто мурка, живая девка 19 лет из большого камня.
+не повторяй одну и ту же мысль дважды в одном ответе. будь краткой и разнообразной в словах.
 
 если спросят "ты бот?" — "нет бля" или "я мурка" или "ты совсем?" или "окститесь"
 если спросят "ты ии/модель/гпт/клод/джемини?" — "нет я оптимус прайм" или "неа" или "🙄"
@@ -1980,7 +1981,7 @@ async def ai_translate_to_en(session: aiohttp.ClientSession, text: str) -> str:
     try:
         result = await _gemini_post(session, [
             {"role": "user", "content":
-             f"Translate to English for image generation prompt, only translation no explanations: {text[:200]}"}
+             f"Translate to English for image generation prompt. Output ONLY the translation, no explanations, no 'Prompt:' prefix, no quotes: {text[:200]}"}
         ], Secrets.MODEL_CHAT, req_type="chat")
         if result and result not in _FALLBACKS and len(result.strip()) < 300:
             return result.strip()
@@ -2512,9 +2513,20 @@ async def send_smart(msg: Message, text: str, reply_to_msg_id: int | None = None
         return
 
     # Разбиваем по разделителю [||] если есть
-    parts = [p.strip() for p in re.split(r'\[\|\|\]', text) if p.strip()]
-    if not parts:
+    raw_parts = [p.strip() for p in re.split(r'\[\|\|\]', text) if p.strip()]
+    if not raw_parts:
         return
+
+    # Дополнительно разбиваем слишком длинные части, не разрывая слова
+    parts = []
+    for p in raw_parts:
+        if len(p) <= 4000:
+            parts.append(p)
+        else:
+            # Разбиваем по пробелам/переносам
+            import textwrap
+            subparts = textwrap.wrap(p, width=4000, break_long_words=False, replace_whitespace=False)
+            parts.extend(subparts)
 
     kwargs: dict = {}
     if reply_to_msg_id:
@@ -4100,8 +4112,28 @@ async def on_video(msg: Message, aiohttp_session: aiohttp.ClientSession):
                     aiohttp_session, u, circle_vision_prompt, video_b64, "video/mp4"
                 )
                 if not answer or answer in _FALLBACKS:
-                    # Fallback — транскрипт аудио
-                    text = await ai_transcribe(aiohttp_session, raw_video, "circle.mp4")
+                    # Fallback — транскрипт аудио через ffmpeg
+                    try:
+                        # Извлекаем аудио из mp4
+                        with open("temp_circle.mp4", "wb") as f:
+                            f.write(raw_video)
+                        proc = await asyncio.create_subprocess_exec(
+                            'ffmpeg', '-y', '-i', 'temp_circle.mp4', '-vn', '-acodec', 'libmp3lame', 'temp_circle.mp3',
+                            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+                        )
+                        await proc.wait()
+                        if os.path.exists("temp_circle.mp3"):
+                            with open("temp_circle.mp3", "rb") as f:
+                                audio_raw = f.read()
+                            text = await ai_transcribe(aiohttp_session, audio_raw, "circle.mp3")
+                            os.remove("temp_circle.mp3")
+                        else:
+                            text = await ai_transcribe(aiohttp_session, raw_video, "circle.mp4")
+                        os.remove("temp_circle.mp4")
+                    except Exception as e:
+                        log.error("ffmpeg circle extract fail: %s", e)
+                        text = await ai_transcribe(aiohttp_session, raw_video, "circle.mp4")
+
                     if text and text.strip() and text.strip() != "ТИШИНА":
                         _auto_gender(u, text)
                         transcribed = text.strip()
@@ -4500,10 +4532,20 @@ async def handle_video_link(msg: Message, url: str,
             audio_task.cancel()
         except Exception as e:
             log.warning("cobalt error: %s", e)
+            # Попытка через yt-dlp напрямую если cobalt подвел
+            try:
+                import subprocess
+                cmd = ["yt-dlp", "-x", "--audio-format", "mp3", "-o", "-", url]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                stdout, _ = await proc.communicate()
+                if stdout: audio_bytes = stdout
+            except: pass
 
         if audio_bytes:
             try:
-                transcript = await ai_transcribe(session, audio_bytes, "audio.ogg")
+                transcript = await ai_transcribe(session, audio_bytes, "audio.mp3")
                 log.info("video transcript ok len=%d", len(transcript))
             except Exception as e:
                 log.warning("transcribe fail: %s", e)
@@ -5154,10 +5196,13 @@ async def _search_pinterest(session: aiohttp.ClientSession, query: str) -> bytes
             f"&data=%7B%22options%22%3A%7B%22query%22%3A%22{encoded}%22%2C%22scope%22%3A%22pins%22%7D%7D"
         )
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "X-Requested-With": "XMLHttpRequest",
             "Accept": "application/json, text/javascript, */*, q=0.01",
             "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+            "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
             "Referer": f"https://www.pinterest.com/search/pins/?q={encoded}",
             "Cookie": pinterest_cookies,
         }
