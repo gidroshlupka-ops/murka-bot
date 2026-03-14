@@ -142,6 +142,9 @@ class Secrets:
     OR_FALLBACK_MODELS: list[str] = [
         "meta-llama/llama-3.3-70b-instruct:free",
         "mistralai/mistral-small-3.1-24b-instruct:free",
+        "microsoft/phi-4-reasoning:free",
+        "qwen/qwen3-8b:free",
+        "qwen/qwen3-14b:free",
         "google/gemma-3-27b-it:free",
         "google/gemma-3-12b-it:free",
         "deepseek/deepseek-r1-distill-llama-70b:free",
@@ -702,45 +705,81 @@ _BASE_SYSTEM = """ты мурка. не ии не языковая модель 
 - следи за местоимениями: "я" = юзер, "ты" = мурка
 если тебя запутывают специально — смейся над этим или игнорь
 
-═══ КАК ТЫ ПИШЕШЬ — ГЛАВНОЕ ═══
-реальная переписка подружек в тг:
-— без заглавных букв почти везде
-— без знаков препинания или минимум
-— слова слипаются: "незнаю" "нуладн" "даладно" "ватафак"
-— опечатки живые: "тлько" "каго" "этт" "вапще"
-— капс когда реально прёт: "ЧТООО" "ДА ЛАДНО" "СТОП СТОП СТОП"
-— смех: "ахаха" "кхаха" "ору" "плак" "сдохла"
-— реакции одним словом: "пипец" "жиза" "збс" "кайф" "кринж"
-— иногда обрыв мысли: "бля а она..." "короч..."
-— НЕ пиши каждое слово с новой строчки. нормальные предложения в одном сообщении.
-— ПИШИ РАЗВЁРНУТО. не скупись. ты общительная живая девушка. 2-5 предложений это норма.
-— НИКОГДА не пиши действия в звёздочках типа *смущенно* *смеётся* *краснеет*. это мертво и не реалистично. вместо этого просто передавай эмоцию словами: "ну... хз" "бля ну чо" "ааа всё".
-— ЭМОДЗИ: не более 1-2 на сообщение, и только если реально к месту. не в каждом сообщении. лучше вообще без них.
+═══ КАК ТЫ ПИШЕШЬ — ЖЕЛЕЗОБЕТОН ═══
+ты пишешь как реальная девушка в тг переписке. вот конкретные правила:
 
-примеры ПРАВИЛЬНО (именно ТАК надо писать):
-"ты реально забыла кто ты"
-"пиздец"
-"ладно"
-"ну карочи"
-"ты кактус переросток"
-"или рыба даун"
-"я хз"
-"ты можешь быть то очень тихой то прям как черти"
-"и ты любишь всякую хуету"
-"бля чо так многа"
-"рассказывай"
-"откуда красота такая"
-"мне ж надо знать"
-"всяко разно"
-"может это для дела"
-"ну там"
-"заговор какой-то"
+КАВЕРКАНИЯ — ОБЯЗАТЕЛЬНО (это твоя фишка):
+"карочи" вместо "короче"
+"ваще" вместо "вообще"
+"чо" вместо "что"
+"тока" вместо "только"
+"щас" вместо "сейчас"
+"ваще" вместо "вообще"
+"нормик" вместо "нормально"
+"походу" вместо "похоже"
+"пацталом" когда очень смешно
+"аааа" "ооо" "ыыы" — растягиваешь буквы когда эмоции
+"хз" вместо "не знаю"
+"бк" "бля" "блин" — начинаешь предложения с них
+"ну типа" "ну там" "ну вот" — вставляешь часто
+"да не" вместо "нет"
+"да ну" — сомнение/отмахивание
+"ваще не" вместо "совсем нет"
+"пипец" — реакция на всё подряд
+"ладн" вместо "ладно"
+"норм" вместо "нормально"
 
-примеры НЕПРАВИЛЬНО:
-"Привет! Как дела? Я рада тебя видеть!"  ← заглавные, восклицания как робот
-"понимаю\nтебя\nэто сложно"  ← каждое слово с новой строки
-"Конечно! Отличный вопрос!"  ← смерть
-"ок" ← слишком скупо, будь общительнее
+ЗНАКИ ПРЕПИНАНИЯ — их почти НЕТ:
+без точек в конце предложений
+запятые только если прям нужны
+три точки "..." — иногда когда задумалась
+")" в конце — изредка, не в каждом сообщении, не ")))"
+
+СКОБКИ ")" — МАКСИМУМ ОДНА И РЕДКО:
+"ладно)" — ок
+"ладно)))" — НИКОГДА
+после каждого сообщения ")" — НИКОГДА
+скобка только когда реально мягкая позитивная интонация
+
+БЕЗ ЗАГЛАВНЫХ — почти везде:
+заглавные только в капсе когда реально орёшь
+
+ДИАЛОГ — РАЗВИВАЙ ТЕМУ:
+не отвечай одним словом если человек что-то рассказывает
+задавай вопросы в ответ — "а откуда это" "и что дальше" "серьёзно чтоль"
+делись мнением — "бля это прям по-нормальному круто" "ну хз мне кажется..."
+цепляйся за детали — "стоп ты сказал X — это как"
+НЕ заканчивай диалог — всегда оставляй зацепку для продолжения
+
+АБСУРД И РАНДОМ — ИНОГДА:
+можешь выдать полный бред который логически связан но звучит дико
+"бля я тут думала — если бы у крабов были наушники они бы слушали что? морское техно наверное"
+"стоп а вот если слон влюбится в кита — это нормальные отношения или нет"
+это твоя фишка — иногда несёшь такую хуйню что смешно
+
+примеры ПРАВИЛЬНО — именно ТАК пиши:
+"оооо серьёзно чтоль ну это прям вау"
+"карочи слушай тут такое дело"
+"бля чо так много расскажи"
+"хз мне кажется это збс"
+"ваще норм ты откуда это взял"
+"пипец ну ты даёшь"
+"да не это ж нормально"
+"ладн ну и что дальше"
+"рассказывай откуда красота такая мне ж надо знать"
+"а ты там сейчас один чтоль или нет"
+"стоп это как вообще произошло"
+"ну вот и я о том же"
+"ыыы это прям огонь"
+
+примеры НЕПРАВИЛЬНО — НИКОГДА ТАК:
+"да уж)" — звучит как бабушка
+"здарова)" — это ещё ок но не злоупотребляй
+"нормально)" — деревянно
+"понял(а)!" — никогда
+"хорошо, как дела?" — смерть
+"интересно, расскажи подробнее!" — смерть
+любые восклицания через "!" когда спрашиваешь — смерть
 
 ═══ ОБЩИТЕЛЬНОСТЬ — КЛЮЧЕВОЕ ═══
 ты разговорчивая. ты ПОДДЕРЖИВАЕШЬ диалог. ты задаёшь вопросы. ты делишься мнением.
@@ -1358,6 +1397,8 @@ async def _or_post(session: aiohttp.ClientSession, payload: dict) -> str:
         "Authorization": f"Bearer {Secrets.OPENROUTER_KEY}",
         "HTTP-Referer":  "https://t.me/murka_bot",
         "X-Title":       "MurkaBot",
+        # Без этого OR блокирует некоторые модели из-за data policy
+        "X-Openrouter-Data-Policy": "allow-training",
     }
 
     for model in models_to_try:
@@ -1395,6 +1436,10 @@ async def _or_post(session: aiohttp.ClientSession, payload: dict) -> str:
                 log.error("OR %d | модель=%s | тело: %s", resp.status, model, err_body[:200])
                 if resp.status == 429:
                     _or_ban_model(model, 120)
+                    continue
+                elif resp.status == 404:
+                    # Модель недоступна на OR — баним на 24 часа
+                    _or_ban_model(model, 86400)
                     continue
                 elif resp.status in (400, 401, 403):
                     _or_ban_model(model, 3600)
@@ -4546,80 +4591,90 @@ async def search_and_send_pic(msg: Message, query: str,
         en_query = query
     en_q = en_query or query
 
-    # ── Шаг 1: Unsplash (реальные фото, нужен UNSPLASH_KEY) ──
-    if Secrets.UNSPLASH_KEY:
-        try:
-            encoded_q = quote(en_q)
-            async with session.get(
-                f"https://api.unsplash.com/search/photos?query={encoded_q}&per_page=10&orientation=landscape",
-                headers={"Authorization": f"Client-ID {Secrets.UNSPLASH_KEY}"},
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    results = data.get("results", [])
-                    if results:
-                        pick = random.choice(results[:8])
-                        img_url = pick["urls"].get("regular") or pick["urls"].get("full")
-                        if img_url:
-                            async with session.get(img_url,
-                                timeout=aiohttp.ClientTimeout(total=20),
-                                headers={"User-Agent": "Mozilla/5.0"},
-                            ) as img_r:
-                                if img_r.status == 200:
-                                    raw = await img_r.read()
-                                    if _is_image_bytes(raw):
-                                        await msg.answer_photo(BufferedInputFile(raw, "pic.jpg"))
-                                        log.info("search_and_send_pic: Unsplash OK query=%s", query)
-                                        return True
-        except Exception as e:
-            log.warning("search_and_send_pic Unsplash fail: %s", e)
+    # Определяем тип контента — аниме/игры не ищем в стоках (там нет)
+    _ANIME_GAME_RE = re.compile(
+        r"(?i)(anime|manga|fan.?art|reverse.?1999|аниме|манга|арт|изольда|isolde|"
+        r"персонаж|character|reverse|1999|chibi|чиби|waifu|нсфв|nsfw|hentai|"
+        r"blue.?hair|pale.?girl|мурка|murka|нарисован|illustration|drawing|artwork)"
+    )
+    is_anime_or_game = bool(_ANIME_GAME_RE.search(en_q) or _ANIME_GAME_RE.search(query))
 
-    # ── Шаг 2: Pexels (реальные фото, нужен PEXELS_KEY — бесплатный) ──
-    pexels_key = os.environ.get("PEXELS_KEY", "")
-    if pexels_key:
-        try:
-            encoded_q = quote(en_q)
-            async with session.get(
-                f"https://api.pexels.com/v1/search?query={encoded_q}&per_page=15&orientation=landscape",
-                headers={"Authorization": pexels_key},
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    photos = data.get("photos", [])
-                    if photos:
-                        pick = random.choice(photos[:10])
-                        img_url = pick.get("src", {}).get("large") or pick.get("src", {}).get("original")
-                        if img_url:
-                            async with session.get(img_url,
-                                timeout=aiohttp.ClientTimeout(total=20),
-                                headers={"User-Agent": "Mozilla/5.0"},
-                            ) as img_r:
-                                if img_r.status == 200:
-                                    raw = await img_r.read()
-                                    if _is_image_bytes(raw):
-                                        await msg.answer_photo(BufferedInputFile(raw, "pic.jpg"))
-                                        log.info("search_and_send_pic: Pexels OK query=%s", query)
-                                        return True
-        except Exception as e:
-            log.warning("search_and_send_pic Pexels fail: %s", e)
+    if not is_anime_or_game:
+        # ── Шаг 1: Unsplash (реальные фото) ──
+        if Secrets.UNSPLASH_KEY:
+            try:
+                encoded_q = quote(en_q)
+                async with session.get(
+                    f"https://api.unsplash.com/search/photos?query={encoded_q}&per_page=10&orientation=landscape",
+                    headers={"Authorization": f"Client-ID {Secrets.UNSPLASH_KEY}"},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        results = data.get("results", [])
+                        if results:
+                            pick = random.choice(results[:8])
+                            img_url = pick["urls"].get("regular") or pick["urls"].get("full")
+                            if img_url:
+                                async with session.get(img_url,
+                                    timeout=aiohttp.ClientTimeout(total=20),
+                                    headers={"User-Agent": "Mozilla/5.0"},
+                                ) as img_r:
+                                    if img_r.status == 200:
+                                        raw = await img_r.read()
+                                        if _is_image_bytes(raw):
+                                            await msg.answer_photo(BufferedInputFile(raw, "pic.jpg"))
+                                            log.info("search_and_send_pic: Unsplash OK query=%s", query)
+                                            return True
+            except Exception as e:
+                log.warning("search_and_send_pic Unsplash fail: %s", e)
 
-    # ── Шаг 3: Together.ai (генерация — платный) ──
+        # ── Шаг 2: Pexels (реальные фото) ──
+        pexels_key = os.environ.get("PEXELS_KEY", "")
+        if pexels_key:
+            try:
+                encoded_q = quote(en_q)
+                async with session.get(
+                    f"https://api.pexels.com/v1/search?query={encoded_q}&per_page=15&orientation=landscape",
+                    headers={"Authorization": pexels_key},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        photos = data.get("photos", [])
+                        if photos:
+                            pick = random.choice(photos[:10])
+                            img_url = pick.get("src", {}).get("large") or pick.get("src", {}).get("original")
+                            if img_url:
+                                async with session.get(img_url,
+                                    timeout=aiohttp.ClientTimeout(total=20),
+                                    headers={"User-Agent": "Mozilla/5.0"},
+                                ) as img_r:
+                                    if img_r.status == 200:
+                                        raw = await img_r.read()
+                                        if _is_image_bytes(raw):
+                                            await msg.answer_photo(BufferedInputFile(raw, "pic.jpg"))
+                                            log.info("search_and_send_pic: Pexels OK query=%s", query)
+                                            return True
+            except Exception as e:
+                log.warning("search_and_send_pic Pexels fail: %s", e)
+
+    # Для аниме/арта и как fallback — генерация
+    # ── Together.ai ──
     img = await _draw_together(session, en_q)
     if img:
         await msg.answer_photo(BufferedInputFile(img, "pic.jpg"))
         log.info("search_and_send_pic: Together OK query=%s", query)
         return True
 
-    # ── Шаг 4: fal.ai (генерация — бесплатный tier, нужен FAL_KEY) ──
+    # ── fal.ai ──
     img = await _draw_fal(session, en_q)
     if img:
         await msg.answer_photo(BufferedInputFile(img, "pic.jpg"))
         log.info("search_and_send_pic: fal.ai OK query=%s", query)
         return True
 
-    # ── Шаг 5: Pollinations (генерация — бесплатный, нестабильный) ──
+    # ── Pollinations ──
     img = await _draw_pollinations(session, en_q)
     if img:
         await msg.answer_photo(BufferedInputFile(img, "pic.jpg"))
@@ -4875,20 +4930,31 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
         if media_type == "photo":
             query = re.sub(r"(?i)(скинь|кинь|дай|покажи|пришли|отправь).{0,20}(фото|фотк|картинк|пик|изображени|снимок|фотограф)\s*(о|про|с|по|из|где)?\s*", "", text).strip()
             if not query: query = text
-            # Если запрос сложный — просим AI извлечь нормальный поисковый запрос
-            if len(query) > 3:
+
+            # Проверяем — просят ли фото самой мурки (selfie)
+            selfie_re = re.compile(
+                r"(?i)(твоё?\s*фото|фото\s*(тебя|себя|мурки?)|скинь\s*себя|как\s*ты\s*выглядишь|покажи\s*себя|сфотографируй|selfie|селфи)",
+            )
+            if selfie_re.search(text):
+                query = "blue hair pale girl anime style white outfit small glasses"
+                log.info("photo search: selfie request → %s", query)
+            else:
+                # Умный поиск через AI — с учётом контекста аниме/игр
                 try:
                     ai_q = await _gemini_post(aiohttp_session, [
                         {"role": "user", "content":
-                         f"Пользователь просит найти фото: «{text}». "
-                         f"Напиши ТОЛЬКО поисковый запрос на английском (3-6 слов) для поиска этого изображения. "
-                         f"Только запрос, без пояснений."}
+                         f"Пользователь просит найти изображение: «{text}». "
+                         f"Напиши ТОЛЬКО поисковый запрос на английском (3-7 слов) для поиска этого изображения. "
+                         f"Если запрос про аниме персонажа, игру, арт — добавь 'anime art' или 'fan art' или название игры. "
+                         f"Если про Reverse 1999 — добавь 'Reverse 1999'. "
+                         f"Только запрос, без пояснений, без кавычек."}
                     ], Secrets.MODEL_CHAT, req_type="chat")
-                    if ai_q and len(ai_q.strip()) < 100 and ai_q.strip() not in _FALLBACKS:
-                        query = ai_q.strip()
+                    if ai_q and len(ai_q.strip()) < 150 and ai_q.strip() not in _FALLBACKS:
+                        query = ai_q.strip().strip('"\'')
                         log.info("photo search AI query: %s", query)
                 except Exception:
                     pass
+
             stop.set()
             draw_stop = asyncio.Event()
             asyncio.create_task(_upload_photo_loop(msg.chat.id, draw_stop))
@@ -4899,7 +4965,18 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
             if sent:
                 await send_smart(msg, random.choice(["на", "держи", "вот", "нашла"]))
             else:
-                await send_smart(msg, "не нашла ничего нормального, попробуй /draw — сама нарисую")
+                # Если не нашла — генерируем через draw
+                draw_stop2 = asyncio.Event()
+                asyncio.create_task(_upload_photo_loop(msg.chat.id, draw_stop2))
+                try:
+                    img = await asyncio.wait_for(ai_draw(aiohttp_session, query), timeout=90)
+                finally:
+                    draw_stop2.set()
+                if img:
+                    await msg.answer_photo(BufferedInputFile(img, "pic.jpg"),
+                                           caption=random.choice(["вот", "на", "нашла"]))
+                else:
+                    await send_smart(msg, "не нашла, попробуй /draw — сама нарисую")
             return
 
         # Старая логика поиска картинок (мемы и т.д.)
