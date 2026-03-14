@@ -140,15 +140,14 @@ class Secrets:
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
     # OR fallback список — только рабочие модели (убраны мёртвые endpoints)
     OR_FALLBACK_MODELS: list[str] = [
-        # Живые и рабочие модели на OR (март 2026)
+        # Актуальные рабочие модели на OR (март 2026)
         "meta-llama/llama-3.3-70b-instruct:free",
         "mistralai/mistral-small-3.1-24b-instruct:free",
-        "mistralai/mistral-7b-instruct:free",
-        "nousresearch/hermes-3-llama-3.1-8b:free",
-        "openchat/openchat-7b:free",
-        "gryphe/mythomist-7b:free",
-        "undi95/toppy-m-7b:free",
-        "huggingfaceh4/zephyr-7b-beta:free",
+        "meta-llama/llama-3.1-8b-instruct:free",
+        "google/gemma-3-4b-it:free",
+        "qwen/qwen-2.5-7b-instruct:free",
+        "microsoft/phi-3-mini-128k-instruct:free",
+        "nvidia/llama-3.1-nemotron-70b-instruct:free",
     ]
     MODEL_FALLBACK_OR: str = "meta-llama/llama-3.3-70b-instruct:free"
     # HF Space для RVC
@@ -716,6 +715,41 @@ class Memory:
 
 
 mem = Memory()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# YOUTUBE COOKIES — из env переменной YOUTUBE_COOKIES_B64
+# ══════════════════════════════════════════════════════════════════════════════
+_yt_cookies_file: str | None = None
+
+def _init_yt_cookies() -> str | None:
+    """Декодирует base64 куки из env и сохраняет во временный файл."""
+    global _yt_cookies_file
+    if _yt_cookies_file and os.path.exists(_yt_cookies_file):
+        return _yt_cookies_file
+    b64 = os.environ.get("YOUTUBE_COOKIES_B64", "")
+    if not b64:
+        return None
+    try:
+        import base64 as _b64, tempfile
+        data = _b64.b64decode(b64)
+        # Сохраняем в постоянный файл (не tempfile — чтобы не удалялся)
+        cookie_path = "/tmp/yt_cookies.txt"
+        with open(cookie_path, "wb") as f:
+            f.write(data)
+        _yt_cookies_file = cookie_path
+        log.info("YT cookies загружены: %d байт → %s", len(data), cookie_path)
+        return cookie_path
+    except Exception as e:
+        log.warning("YT cookies init fail: %s", e)
+        return None
+
+def _get_yt_cookie_args() -> list[str]:
+    """Возвращает аргументы --cookies для yt-dlp если есть."""
+    path = _init_yt_cookies()
+    if path:
+        return ["--cookies", path]
+    return []
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1654,7 +1688,7 @@ async def ai_chat(session: aiohttp.ClientSession, uid_str: str, text: str,
                [{"role": "user", "content": text}]
     answer = await _post(session, {
         "model":      model or Secrets.MODEL_CHAT,
-        "max_tokens": 2048, "messages": messages,
+        "max_tokens": 800, "messages": messages,
     }, req_type="chat")
     answer = _fix_gender(answer)
     answer = _murkaify(answer)
@@ -1792,130 +1826,113 @@ def _is_image_bytes(data: bytes) -> bool:
     )
 
 
-async def _draw_together(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
-    """Генерация через Together.ai FLUX — надёжный платный tier."""
-    if not Secrets.TOGETHER_KEY:
-        return None
+async def _draw_nanobanana(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
+    """Генерация через NanoBanana (Stable Diffusion, бесплатно, без ключа, быстро ~5-10с)."""
+    from urllib.parse import quote
     try:
+        # NanoBanana API — бесплатный, быстрый SD XL
         payload = {
-            "model": "black-forest-labs/FLUX.1-schnell-Free",
             "prompt": prompt,
-            "width": 1024, "height": 1024,
-            "steps": 4, "n": 1,
-            "response_format": "b64_json",
+            "negative_prompt": "blurry, bad quality, ugly, deformed",
+            "width": 512,
+            "height": 512,
+            "num_inference_steps": 20,
+            "guidance_scale": 7,
         }
         async with session.post(
-            "https://api.together.xyz/v1/images/generations",
+            "https://nanobanana.com/api/text-to-image",
             json=payload,
-            headers={"Authorization": f"Bearer {Secrets.TOGETHER_KEY}",
-                     "Content-Type": "application/json"},
-            timeout=aiohttp.ClientTimeout(total=60),
+            headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+            timeout=aiohttp.ClientTimeout(total=30),
         ) as r:
             if r.status == 200:
-                data = await r.json()
-                b64 = data["data"][0].get("b64_json", "")
-                if b64:
-                    img = base64.b64decode(b64)
-                    if _is_image_bytes(img):
-                        log.info("draw Together OK size=%d", len(img))
-                        return img
+                data = await r.json(content_type=None)
+                # Пробуем разные форматы ответа
+                img_b64 = (data.get("image") or data.get("images", [None])[0]
+                           or data.get("output") or "")
+                if img_b64:
+                    import base64 as _b64
+                    raw = _b64.b64decode(img_b64)
+                    if _is_image_bytes(raw):
+                        log.info("NanoBanana OK size=%d", len(raw))
+                        return raw
             else:
-                log.warning("draw Together %d: %s", r.status, (await r.text())[:120])
+                log.debug("NanoBanana %d: %s", r.status, (await r.text())[:80])
+    except asyncio.TimeoutError:
+        log.warning("NanoBanana timeout")
     except Exception as e:
-        log.error("draw Together exc: %s", e)
+        log.debug("NanoBanana fail: %s", e)
+    return None
+
+
+async def _draw_hf_sdxl(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
+    """Генерация через Hugging Face Inference API (SDXL, бесплатно с HF_TOKEN)."""
+    hf_token = os.environ.get("HF_TOKEN", "")
+    model = "stabilityai/stable-diffusion-xl-base-1.0"
+    # Пробуем несколько бесплатных моделей
+    models = [
+        "stabilityai/stable-diffusion-2-1",
+        "runwayml/stable-diffusion-v1-5",
+        "CompVis/stable-diffusion-v1-4",
+    ]
+    headers = {"Content-Type": "application/json"}
+    if hf_token:
+        headers["Authorization"] = f"Bearer {hf_token}"
+    for model in models:
+        try:
+            async with session.post(
+                f"https://api-inference.huggingface.co/models/{model}",
+                json={"inputs": prompt, "parameters": {"num_inference_steps": 20}},
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=25),
+            ) as r:
+                if r.status == 200:
+                    ct = r.headers.get("content-type", "")
+                    if "image" in ct:
+                        raw = await r.read()
+                        if _is_image_bytes(raw):
+                            log.info("HF SDXL OK model=%s size=%d", model, len(raw))
+                            return raw
+                elif r.status == 503:
+                    log.debug("HF model %s loading, skip", model)
+                    continue
+        except asyncio.TimeoutError:
+            log.debug("HF timeout model=%s", model)
+            continue
+        except Exception as e:
+            log.debug("HF fail model=%s: %s", model, e)
+            continue
     return None
 
 
 async def _draw_pollinations(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
-    """Генерация через Pollinations — fallback с несколькими эндпоинтами."""
+    """Генерация через Pollinations — быстрый fallback."""
     from urllib.parse import quote
     encoded = quote(prompt)
     seed = random.randint(1, 999999)
-    # Пробуем разные модели и параметры
     urls = [
-        f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&nofeed=true&model=flux&seed={seed}&safe=false",
-        f"https://image.pollinations.ai/prompt/{encoded}?width=768&height=768&nologo=true&nofeed=true&model=flux-realism&seed={seed}",
-        f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512&nologo=true&nofeed=true&model=flux&seed={seed}",
+        f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512&nologo=true&nofeed=true&model=flux&seed={seed}&safe=false",
+        f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=512&nologo=true&nofeed=true&model=turbo&seed={seed}",
     ]
     for i, url in enumerate(urls):
         try:
-            log.info("draw pollinations %d: %s", i, url[:90])
             async with session.get(url,
-                timeout=aiohttp.ClientTimeout(total=90),
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+                timeout=aiohttp.ClientTimeout(total=20),
+                headers={"User-Agent": "Mozilla/5.0"},
                 allow_redirects=True,
             ) as r:
                 if r.status == 200:
                     ct = r.headers.get("content-type", "")
                     raw = await r.read()
                     if "image" in ct and _is_image_bytes(raw):
-                        log.info("draw pollinations OK size=%d", len(raw))
+                        log.info("Pollinations OK size=%d", len(raw))
                         return raw
-                    log.warning("draw pollinations %d: bad ct=%s size=%d", i, ct, len(raw))
-                else:
-                    log.warning("draw pollinations %d: status %d", i, r.status)
         except asyncio.TimeoutError:
-            log.warning("draw pollinations %d timeout", i)
+            log.debug("Pollinations %d timeout", i)
         except Exception as e:
-            log.error("draw pollinations %d exc: %s", i, e)
+            log.debug("Pollinations %d fail: %s", i, e)
         if i < len(urls) - 1:
-            await asyncio.sleep(1)
-    return None
-
-
-async def _draw_fal(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
-    """Генерация через fal.ai queue API (FLUX schnell, бесплатный tier)."""
-    fal_key = os.environ.get("FAL_KEY", "")
-    if not fal_key:
-        return None
-    try:
-        # Запускаем задачу
-        async with session.post(
-            "https://queue.fal.run/fal-ai/flux/schnell",
-            json={"prompt": prompt, "image_size": "square_hd", "num_images": 1},
-            headers={"Authorization": f"Key {fal_key}", "Content-Type": "application/json"},
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as r:
-            if r.status not in (200, 202):
-                log.warning("fal submit %d: %s", r.status, (await r.text())[:100])
-                return None
-            data = await r.json()
-            request_id = data.get("request_id", "")
-            status_url = data.get("status_url", f"https://queue.fal.run/fal-ai/flux/schnell/requests/{request_id}/status")
-            result_url = data.get("response_url", f"https://queue.fal.run/fal-ai/flux/schnell/requests/{request_id}")
-        if not request_id:
-            return None
-        # Поллим статус
-        for _ in range(20):
-            await asyncio.sleep(3)
-            async with session.get(status_url,
-                headers={"Authorization": f"Key {fal_key}"},
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as r:
-                if r.status == 200:
-                    s = await r.json()
-                    if s.get("status") == "COMPLETED":
-                        break
-                    if s.get("status") in ("FAILED", "CANCELLED"):
-                        log.warning("fal job failed: %s", s)
-                        return None
-        # Забираем результат
-        async with session.get(result_url,
-            headers={"Authorization": f"Key {fal_key}"},
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as r:
-            if r.status == 200:
-                res = await r.json()
-                img_url = (res.get("images") or [{}])[0].get("url", "")
-                if img_url:
-                    async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=30)) as ir:
-                        if ir.status == 200:
-                            raw = await ir.read()
-                            if _is_image_bytes(raw):
-                                log.info("draw fal OK size=%d", len(raw))
-                                return raw
-    except Exception as e:
-        log.warning("draw fal exc: %s", e)
+            await asyncio.sleep(0.5)
     return None
 
 
@@ -1930,32 +1947,24 @@ async def ai_draw(session: aiohttp.ClientSession, prompt: str) -> bytes | None:
     final_prompt = en_prompt or clean
     log.info("ai_draw: prompt='%s' → en='%s'", clean[:60], final_prompt[:60])
 
-    # 1. Together.ai (платный, надёжный)
-    result = await _draw_together(session, final_prompt)
+    # 1. NanoBanana (бесплатно, быстро)
+    result = await _draw_nanobanana(session, final_prompt)
     if result:
         return result
-    log.info("ai_draw: Together не вышло, пробуем fal.ai")
 
-    # 2. fal.ai (бесплатный tier, нужен FAL_KEY)
-    result = await _draw_fal(session, final_prompt)
+    # 2. HuggingFace SDXL (бесплатно, нужен HF_TOKEN опционально)
+    result = await _draw_hf_sdxl(session, final_prompt)
     if result:
         return result
-    log.info("ai_draw: fal.ai не вышло, пробуем Pollinations")
 
-    # 3. Pollinations fallback
+    # 3. Pollinations (бесплатно, нестабильно)
     result = await _draw_pollinations(session, final_prompt)
     if result:
         return result
 
-    # 4. Pollinations с оригинальным RU промтом
-    if final_prompt != clean:
-        log.info("ai_draw: Pollinations EN не вышел, пробуем с RU промтом")
-        result = await _draw_pollinations(session, clean)
-        if result:
-            return result
-
     log.warning("ai_draw: все методы не дали результата для prompt='%s'", clean[:60])
     return None
+
 
 
 async def ai_translate_to_en(session: aiohttp.ClientSession, text: str) -> str:
@@ -4284,9 +4293,9 @@ async def _ytdlp_download_audio(url: str) -> bytes | None:
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             out_tmpl = os.path.join(tmpdir, "audio.%(ext)s")
-            yt_args = []
+            yt_args = _get_yt_cookie_args()
             if "youtu" in url:
-                yt_args = [
+                yt_args += [
                     "--extractor-args", "youtube:player_client=web,mweb",
                     "--add-headers", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
                 ]
@@ -4338,9 +4347,9 @@ async def _ytdlp_download_video(url: str) -> tuple[bytes | None, str]:
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             out_tmpl = os.path.join(tmpdir, "video.%(ext)s")
-            yt_args = []
+            yt_args = _get_yt_cookie_args()
             if "youtu" in url:
-                yt_args = [
+                yt_args += [
                     "--extractor-args", "youtube:player_client=web,mweb",
                     "--add-headers", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
                 ]
@@ -5010,9 +5019,9 @@ async def search_and_send_music(msg: Message, query: str,
 
     log.info("music search: '%s' → '%s'", query, search_q)
 
-    # Пробуем оба источника: YouTube Music, потом обычный YouTube
+    # Пробуем оба источника: YouTube Music через ytsearch (ytmsearch требует плагин)
     search_urls = [
-        f"ytmsearch1:{search_q}",
+        f"ytsearch1:{search_q} audio",
         f"ytsearch1:{search_q}",
         f"ytsearch1:{query}",  # оригинальный запрос если переводной не нашёл
     ]
@@ -5021,20 +5030,21 @@ async def search_and_send_music(msg: Message, query: str,
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
                 out_tmpl = os.path.join(tmpdir, "music.%(ext)s")
+                _music_yt_args = _get_yt_cookie_args() + [
+                    "--extractor-args", "youtube:player_client=web,mweb",
+                    "--add-headers", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                ]
                 proc = await asyncio.create_subprocess_exec(
                     "yt-dlp",
                     "--extract-audio",
-                    # opus надёжнее чем mp3 — не требует libmp3lame
                     "--audio-format", "best",
                     "--audio-quality", "5",
                     "--max-filesize", "49m",
                     "--no-playlist",
-                    "--extractor-args", "youtube:player_client=web,mweb",
-                    "--add-headers", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                    *_music_yt_args,
                     "-o", out_tmpl,
                     "--no-warnings",
                     "--ignore-errors",
-                    # Печатаем название ДО скачивания
                     "--print", "before_dl:%(title)s",
                     search_url,
                     stdout=asyncio.subprocess.PIPE,
@@ -5187,93 +5197,28 @@ async def search_and_send_pic(msg: Message, query: str,
     )
     is_anime_or_game = bool(_ANIME_GAME_RE.search(en_q) or _ANIME_GAME_RE.search(query))
 
-    if not is_anime_or_game:
-        # ── Pinterest (лучший для разнообразных запросов) ──
-        raw = await _search_pinterest(session, en_q)
-        if raw:
-            await msg.answer_photo(BufferedInputFile(raw, "pic.jpg"))
-            log.info("search_and_send_pic: Pinterest OK query=%s", query)
-            return True
-
-        # ── Unsplash (реальные фото) ──
-        if Secrets.UNSPLASH_KEY:
-            try:
-                encoded_q = quote(en_q)
-                async with session.get(
-                    f"https://api.unsplash.com/search/photos?query={encoded_q}&per_page=10&orientation=landscape",
-                    headers={"Authorization": f"Client-ID {Secrets.UNSPLASH_KEY}"},
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as r:
-                    if r.status == 200:
-                        data = await r.json()
-                        results = data.get("results", [])
-                        if results:
-                            pick = random.choice(results[:8])
-                            img_url = pick["urls"].get("regular") or pick["urls"].get("full")
-                            if img_url:
-                                async with session.get(img_url,
-                                    timeout=aiohttp.ClientTimeout(total=15),
-                                    headers={"User-Agent": "Mozilla/5.0"},
-                                ) as img_r:
-                                    if img_r.status == 200:
-                                        raw = await img_r.read()
-                                        if _is_image_bytes(raw):
-                                            await msg.answer_photo(BufferedInputFile(raw, "pic.jpg"))
-                                            log.info("search_and_send_pic: Unsplash OK query=%s", query)
-                                            return True
-            except Exception as e:
-                log.warning("search_and_send_pic Unsplash fail: %s", e)
-
-        # ── Pexels (реальные фото) ──
-        pexels_key = os.environ.get("PEXELS_KEY", "")
-        if pexels_key:
-            try:
-                encoded_q = quote(en_q)
-                async with session.get(
-                    f"https://api.pexels.com/v1/search?query={encoded_q}&per_page=15&orientation=landscape",
-                    headers={"Authorization": pexels_key},
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as r:
-                    if r.status == 200:
-                        data = await r.json()
-                        photos = data.get("photos", [])
-                        if photos:
-                            pick = random.choice(photos[:10])
-                            img_url = pick.get("src", {}).get("large") or pick.get("src", {}).get("original")
-                            if img_url:
-                                async with session.get(img_url,
-                                    timeout=aiohttp.ClientTimeout(total=15),
-                                    headers={"User-Agent": "Mozilla/5.0"},
-                                ) as img_r:
-                                    if img_r.status == 200:
-                                        raw = await img_r.read()
-                                        if _is_image_bytes(raw):
-                                            await msg.answer_photo(BufferedInputFile(raw, "pic.jpg"))
-                                            log.info("search_and_send_pic: Pexels OK query=%s", query)
-                                            return True
-            except Exception as e:
-                log.warning("search_and_send_pic Pexels fail: %s", e)
-
-    # Для аниме/арта и как fallback — генерация
-    # ── Together.ai ──
-    img = await _draw_together(session, en_q)
-    if img:
-        await msg.answer_photo(BufferedInputFile(img, "pic.jpg"))
-        log.info("search_and_send_pic: Together OK query=%s", query)
+    # ── Pinterest ТОЛЬКО (основной источник) ──
+    raw = await _search_pinterest(session, en_q)
+    if raw:
+        await msg.answer_photo(BufferedInputFile(raw, "pic.jpg"))
+        log.info("search_and_send_pic: Pinterest OK query=%s", query)
         return True
 
-    # ── fal.ai ──
-    img = await _draw_fal(session, en_q)
+    # ── Fallback: генерация если Pinterest не нашёл ──
+    img = await _draw_nanobanana(session, en_q)
     if img:
         await msg.answer_photo(BufferedInputFile(img, "pic.jpg"))
-        log.info("search_and_send_pic: fal.ai OK query=%s", query)
+        log.info("search_and_send_pic: NanoBanana fallback OK query=%s", query)
         return True
 
-    # ── Pollinations ──
+    img = await _draw_hf_sdxl(session, en_q)
+    if img:
+        await msg.answer_photo(BufferedInputFile(img, "pic.jpg"))
+        return True
+
     img = await _draw_pollinations(session, en_q)
     if img:
         await msg.answer_photo(BufferedInputFile(img, "pic.jpg"))
-        log.info("search_and_send_pic: Pollinations OK query=%s", query)
         return True
 
     return False
@@ -5427,48 +5372,57 @@ async def on_text(msg: Message, aiohttp_session: aiohttp.ClientSession):
                 ]))
             return
 
-        # ИСПРАВЛЕНО: "нарисуй ..." — обрабатываем здесь, без отдельного хендлера
+        # "нарисуй ..." или /draw промт
         draw_inline = re.match(r"(?i)^нарисуй\s+.+", text)
-        if draw_inline:
+        is_draw_waiting = u in _draw_waiting
+        if draw_inline or is_draw_waiting:
+            if is_draw_waiting:
+                _draw_waiting.discard(u)
+            draw_prompt = text
             stop.set()
-            draw_stop = asyncio.Event()
-            asyncio.create_task(_upload_photo_loop(msg.chat.id, draw_stop))
-            img = None
-            try:
-                img = await asyncio.wait_for(ai_draw(aiohttp_session, text), timeout=150)
-            except asyncio.TimeoutError:
-                log.warning("inline draw timeout: %s", text[:60])
-            finally:
-                draw_stop.set()
-            if img:
-                await msg.answer_photo(BufferedInputFile(img, "murka_art.jpg"), caption="на жри 🎨")
-            else:
-                await msg.answer(random.choice([
-                    "pollinations лежит сейчас, попробуй через минуту",
-                    "сервер рисования не отвечает 😔 попробуй позже",
-                ]))
-            return
 
-        # /draw промт
-        if u in _draw_waiting:
-            _draw_waiting.discard(u)
-            stop.set()
+            # Статус-сообщение — не удаляем, юзер видит процесс
+            status_phrases = [
+                "ща погоди, рисую",
+                "секунду, генерирую",
+                "ок, щас нарисую",
+                "рисую, подожди чуть",
+                "момент, работаю над этим",
+            ]
+            status_msg = await msg.answer(random.choice(status_phrases))
+
+            # Генерируем детальный промт через Gemini
+            try:
+                enhanced = await _gemini_post(aiohttp_session, [
+                    {"role": "user", "content":
+                     f"Пользователь хочет: «{draw_prompt}». "
+                     f"Напиши детальный промт на английском для генерации изображения через Stable Diffusion. "
+                     f"Включи: стиль, освещение, детали, цвета, качество. Максимум 80 слов. "
+                     f"Только промт, без объяснений."}
+                ], Secrets.MODEL_CHAT, req_type="chat")
+                if enhanced and len(enhanced.strip()) > 10 and enhanced.strip() not in _FALLBACKS:
+                    final_draw_prompt = enhanced.strip()
+                    log.info("ai_draw enhanced: %s", final_draw_prompt[:80])
+                else:
+                    final_draw_prompt = draw_prompt
+            except Exception:
+                final_draw_prompt = draw_prompt
+
             draw_stop = asyncio.Event()
             asyncio.create_task(_upload_photo_loop(msg.chat.id, draw_stop))
             img = None
             try:
-                img = await asyncio.wait_for(ai_draw(aiohttp_session, text), timeout=90)
+                img = await asyncio.wait_for(ai_draw(aiohttp_session, final_draw_prompt), timeout=60)
             except asyncio.TimeoutError:
-                pass
+                log.warning("draw timeout: %s", draw_prompt[:60])
             finally:
                 draw_stop.set()
             if img:
-                await msg.answer_photo(BufferedInputFile(img, "murka_art.jpg"), caption="на жри 🎨")
+                await msg.answer_photo(BufferedInputFile(img, "murka_art.jpg"), caption="вот")
             else:
                 await msg.answer(random.choice([
-                    "pollinations лежит сейчас, попробуй через минуту",
-                    "сервер рисования не отвечает 😔 попробуй позже",
-                    "не могу нарисовать — сервак упал, подожди немного"
+                    "чот не вышло нарисовать, попробуй ещё раз",
+                    "сервер рисования не отвечает, попробуй позже",
                 ]))
             return
 
@@ -5810,15 +5764,17 @@ async def on_reaction(event: MessageReactionUpdated, aiohttp_session: aiohttp.Cl
 
         answer = await ai_chat(aiohttp_session, uid_str, prompt)
         if answer and answer not in _FALLBACKS:
-            # Создаём фиктивный объект чтобы прогнать через maybe_send_sticker
-            # напрямую очищаем теги стикеров из ответа реакции
             answer = re.sub(r"\[(СТИКЕР|ГИФКА):\s*[^\]]+\]", "", answer, flags=re.I).strip()
-            if answer:
-                await bot.send_message(
-                    chat_id,
-                    answer,
-                    reply_parameters=ReplyParameters(message_id=msg_id),
-                )
+            # Разбиваем по тройным переносам (несколько сообщений)
+            answer = re.sub(r'\[\|\|\]', '\n\n\n', answer)
+            reaction_parts = [p.strip() for p in re.split(r'\n{3,}', answer) if p.strip()]
+            for i, part in enumerate(reaction_parts):
+                if not part:
+                    continue
+                kw = {"reply_parameters": ReplyParameters(message_id=msg_id)} if i == 0 else {}
+                await bot.send_message(chat_id, part, **kw)
+                if i < len(reaction_parts) - 1:
+                    await asyncio.sleep(0.5)
     except Exception:
         log.exception("on_reaction")
 
