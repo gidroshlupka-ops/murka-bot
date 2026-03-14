@@ -135,8 +135,8 @@ class Secrets:
         "https://image.pollinations.ai/prompt/{prompt}"
         "?width=1024&height=1024&nologo=true&enhance=true&model=flux"
     )
-    MODEL_CHAT:    str = "google/gemini-2.5-flash-lite"
-    MODEL_VISION:  str = "google/gemini-2.5-flash-lite"  # flash даёт только 20 RPD, lite — 1000 RPD
+    MODEL_CHAT:    str = "gemini-2.0-flash"
+    MODEL_VISION:  str = "gemini-2.0-flash"  # flash даёт только 20 RPD, lite — 1000 RPD
     MODEL_WHISPER: str = "openai/whisper-large-v3-turbo"
     # OR fallback список — только рабочие модели (убраны мёртвые endpoints)
     OR_FALLBACK_MODELS: list[str] = [
