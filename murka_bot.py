@@ -5001,7 +5001,7 @@ async def search_and_send_music(msg: Message, query: str,
             log.warning("yt-dlp недоступен для музыки")
             return False
 
-    # Переводим запрос на английский для лучшего поиска если нужно
+    # Переводим на английский для лучшего поиска
     try:
         en_query = await ai_translate_to_en(session, query)
         search_q = en_query if en_query and len(en_query) > 3 else query
@@ -5010,133 +5010,163 @@ async def search_and_send_music(msg: Message, query: str,
 
     log.info("music search: '%s' → '%s'", query, search_q)
 
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            out_tmpl = os.path.join(tmpdir, "music.%(ext)s")
-            # Ищем через YouTube Music (ytmsearch) или обычный YouTube (ytsearch)
-            search_url = f"ytmsearch1:{search_q}"
-            proc = await asyncio.create_subprocess_exec(
-                "yt-dlp",
-                "--extract-audio",
-                "--audio-format", "mp3",
-                "--audio-quality", "5",
-                "--max-filesize", "49m",
-                "--no-playlist",
-                "--extractor-args", "youtube:player_client=web,mweb",
-                "--add-headers", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                "-o", out_tmpl,
-                "--no-warnings",
-                "--ignore-errors",
-                "--print", "before_dl:%(title)s — %(uploader)s",
-                search_url,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=90)
-            track_info = (stdout.decode("utf-8", errors="ignore") or "").strip().split("\n")[0]
+    # Пробуем оба источника: YouTube Music, потом обычный YouTube
+    search_urls = [
+        f"ytmsearch1:{search_q}",
+        f"ytsearch1:{search_q}",
+        f"ytsearch1:{query}",  # оригинальный запрос если переводной не нашёл
+    ]
 
-            # Ищем скачанный файл
-            for fname in os.listdir(tmpdir):
-                if fname.endswith(".mp3"):
-                    fpath = os.path.join(tmpdir, fname)
-                    size = os.path.getsize(fpath)
-                    if size > 50000:  # минимум 50KB
-                        with open(fpath, "rb") as f:
-                            data = f.read()
-                        # Название для файла — чистим
-                        clean_name = re.sub(r'[^\w\s\-]', '', query[:40]).strip() or "track"
-                        audio_fname = f"{clean_name}.mp3"
-                        caption = track_info[:100] if track_info else random.choice(["на", "держи", "вот"])
-                        await msg.answer_audio(
-                            BufferedInputFile(data, audio_fname),
-                            caption=caption,
-                        )
-                        log.info("music OK: '%s' size=%d", query[:50], size)
-                        return True
+    for search_url in search_urls:
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                out_tmpl = os.path.join(tmpdir, "music.%(ext)s")
+                proc = await asyncio.create_subprocess_exec(
+                    "yt-dlp",
+                    "--extract-audio",
+                    # opus надёжнее чем mp3 — не требует libmp3lame
+                    "--audio-format", "best",
+                    "--audio-quality", "5",
+                    "--max-filesize", "49m",
+                    "--no-playlist",
+                    "--extractor-args", "youtube:player_client=web,mweb",
+                    "--add-headers", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                    "-o", out_tmpl,
+                    "--no-warnings",
+                    "--ignore-errors",
+                    # Печатаем название ДО скачивания
+                    "--print", "before_dl:%(title)s",
+                    search_url,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=90)
+                track_title = (stdout.decode("utf-8", errors="ignore") or "").strip().split("\n")[0]
+                stderr_txt = stderr.decode("utf-8", errors="ignore")
+                if stderr_txt and "ERROR" in stderr_txt:
+                    log.warning("yt-dlp music stderr: %s", stderr_txt[:200])
 
-        # Если ytmsearch не нашёл — пробуем обычный ytsearch
-        with tempfile.TemporaryDirectory() as tmpdir2:
-            out_tmpl2 = os.path.join(tmpdir2, "music.%(ext)s")
-            search_url2 = f"ytsearch1:{search_q}"
-            proc2 = await asyncio.create_subprocess_exec(
-                "yt-dlp",
-                "--extract-audio", "--audio-format", "mp3",
-                "--audio-quality", "5",
-                "--max-filesize", "49m",
-                "--no-playlist",
-                "--extractor-args", "youtube:player_client=web,mweb",
-                "-o", out_tmpl2,
-                "--no-warnings", "--ignore-errors",
-                search_url2,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(proc2.wait(), timeout=90)
-            for fname in os.listdir(tmpdir2):
-                if fname.endswith(".mp3"):
-                    fpath = os.path.join(tmpdir2, fname)
-                    size = os.path.getsize(fpath)
-                    if size > 50000:
-                        with open(fpath, "rb") as f:
-                            data = f.read()
-                        clean_name = re.sub(r'[^\w\s\-]', '', query[:40]).strip() or "track"
-                        await msg.answer_audio(
-                            BufferedInputFile(data, f"{clean_name}.mp3"),
-                            caption=random.choice(["на", "держи", "вот"]),
-                        )
-                        log.info("music ytsearch OK: '%s' size=%d", query[:50], size)
-                        return True
+                # Ищем любой аудиофайл (webm, opus, ogg, m4a, mp3...)
+                audio_exts = (".mp3", ".opus", ".ogg", ".webm", ".m4a", ".aac", ".flac")
+                for fname in sorted(os.listdir(tmpdir)):
+                    if any(fname.endswith(ext) for ext in audio_exts):
+                        fpath = os.path.join(tmpdir, fname)
+                        size = os.path.getsize(fpath)
+                        if size > 30000:  # минимум 30KB
+                            with open(fpath, "rb") as f:
+                                data = f.read()
 
-    except asyncio.TimeoutError:
-        log.warning("music search timeout: '%s'", query[:50])
-    except Exception as e:
-        log.error("music search fail: %s", e)
+                            # Пробуем конвертировать в mp3 если ffmpeg есть
+                            mp3_data = None
+                            if shutil.which("ffmpeg"):
+                                try:
+                                    conv = await asyncio.create_subprocess_exec(
+                                        "ffmpeg", "-y", "-i", "pipe:0",
+                                        "-vn", "-acodec", "libmp3lame", "-q:a", "4",
+                                        "-f", "mp3", "pipe:1",
+                                        stdin=asyncio.subprocess.PIPE,
+                                        stdout=asyncio.subprocess.PIPE,
+                                        stderr=asyncio.subprocess.DEVNULL,
+                                    )
+                                    mp3_out, _ = await asyncio.wait_for(
+                                        conv.communicate(data), timeout=30
+                                    )
+                                    if mp3_out and len(mp3_out) > 10000:
+                                        mp3_data = mp3_out
+                                except Exception as e:
+                                    log.debug("mp3 convert fail: %s", e)
+
+                            send_data = mp3_data or data
+                            ext_out = "mp3" if mp3_data else fname.rsplit(".", 1)[-1]
+                            clean_name = re.sub(r'[^\w\s\-]', '', (track_title or query)[:50]).strip() or "track"
+                            audio_fname = f"{clean_name}.{ext_out}"
+                            caption = track_title[:100] if track_title else random.choice(["на", "держи", "вот"])
+
+                            await msg.answer_audio(
+                                BufferedInputFile(send_data, audio_fname),
+                                caption=caption,
+                            )
+                            log.info("music OK: '%s' ext=%s size=%d", query[:50], ext_out, len(send_data))
+                            return True
+
+        except asyncio.TimeoutError:
+            log.warning("music timeout for url='%s'", search_url[:60])
+            continue
+        except Exception as e:
+            log.error("music search fail url='%s': %s", search_url[:60], e)
+            continue
+
     return False
 
 
 async def _search_pinterest(session: aiohttp.ClientSession, query: str) -> bytes | None:
-    """Поиск изображений через Pinterest (без ключа, через публичное API)."""
+    """Поиск изображений через Pinterest с авторизацией через куки."""
     from urllib.parse import quote
+
+    # Куки берём из env переменной PINTEREST_COOKIES
+    # Формат: "sessionFunnelEventLogged=1; _auth=1; _b=...; csrftoken=...; _pinterest_sess=..."
+    pinterest_cookies = os.environ.get("PINTEREST_COOKIES", "")
+    if not pinterest_cookies:
+        log.debug("Pinterest: нет PINTEREST_COOKIES в env, пропускаем")
+        return None
+
     try:
         encoded = quote(query)
-        # Pinterest публичный поиск через их виджет API
-        url = f"https://www.pinterest.com/resource/BaseSearchResource/get/?source_url=%2Fsearch%2Fpins%2F%3Fq%3D{encoded}&data=%7B%22options%22%3A%7B%22query%22%3A%22{encoded}%22%2C%22scope%22%3A%22pins%22%7D%7D"
+        # Используем официальный Pinterest search API
+        url = (
+            f"https://www.pinterest.com/resource/BaseSearchResource/get/"
+            f"?source_url=%2Fsearch%2Fpins%2F%3Fq%3D{encoded}"
+            f"&data=%7B%22options%22%3A%7B%22query%22%3A%22{encoded}%22%2C%22scope%22%3A%22pins%22%7D%7D"
+        )
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
             "X-Requested-With": "XMLHttpRequest",
-            "Accept": "application/json",
+            "Accept": "application/json, text/javascript, */*, q=0.01",
+            "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+            "Referer": f"https://www.pinterest.com/search/pins/?q={encoded}",
+            "Cookie": pinterest_cookies,
         }
-        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as r:
-            if r.status == 200:
-                data = await r.json(content_type=None)
-                pins = (data.get("resource_response", {})
-                            .get("data", {})
-                            .get("results", []))
-                # Собираем все img url
-                img_urls = []
-                for pin in pins[:20]:
-                    images = pin.get("images", {})
-                    for size in ("736x", "564x", "474x", "orig"):
-                        img_data = images.get(size)
-                        if img_data and img_data.get("url"):
-                            img_urls.append(img_data["url"])
-                            break
-                random.shuffle(img_urls)
-                for img_url in img_urls[:5]:
-                    try:
-                        async with session.get(img_url,
-                            timeout=aiohttp.ClientTimeout(total=10),
-                            headers={"User-Agent": "Mozilla/5.0"},
-                        ) as ir:
-                            if ir.status == 200:
-                                raw = await ir.read()
-                                if _is_image_bytes(raw):
-                                    log.info("Pinterest OK query=%s size=%d", query[:40], len(raw))
-                                    return raw
-                    except Exception:
-                        continue
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=12)) as r:
+            if r.status != 200:
+                log.warning("Pinterest HTTP %d", r.status)
+                return None
+            data = await r.json(content_type=None)
+            pins = (data.get("resource_response", {})
+                        .get("data", {})
+                        .get("results", []))
+            if not pins:
+                log.debug("Pinterest: пустые результаты для '%s'", query[:40])
+                return None
+
+            # Собираем URL изображений
+            img_urls = []
+            for pin in pins[:20]:
+                images = pin.get("images", {})
+                for size in ("736x", "564x", "474x", "orig"):
+                    img_data = images.get(size)
+                    if img_data and img_data.get("url"):
+                        img_urls.append(img_data["url"])
+                        break
+
+            random.shuffle(img_urls)
+            for img_url in img_urls[:5]:
+                try:
+                    async with session.get(img_url,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                        headers={"User-Agent": "Mozilla/5.0", "Cookie": pinterest_cookies},
+                    ) as ir:
+                        if ir.status == 200:
+                            raw = await ir.read()
+                            if _is_image_bytes(raw):
+                                log.info("Pinterest OK query='%s' size=%d", query[:40], len(raw))
+                                return raw
+                except Exception:
+                    continue
+
+    except asyncio.TimeoutError:
+        log.warning("Pinterest timeout для '%s'", query[:40])
     except Exception as e:
-        log.debug("Pinterest fail: %s", e)
+        log.warning("Pinterest fail: %s", e)
     return None
 
 
